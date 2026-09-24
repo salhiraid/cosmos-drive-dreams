@@ -62,6 +62,12 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--caption_path", type=str, required=True, help="folder containing the json files of captions")
     parser.add_argument("--input_path", type=str, required=True, help="folder containing the hdmap/lidar condition videos")
     parser.add_argument(
+        "--camera_folder",
+        type=str,
+        default="ftheta_camera_front_wide_120fov",
+        help="camera sub-folder of the condition videos, i.e. <input_path>/hdmap/<camera_folder>/<clip_id>_0.mp4",
+    )
+    parser.add_argument(
         "--negative_prompt",
         type=str,
         default="The video captures a game playing, with bad crappy graphics and cartoonish frames. It represents a recording of old outdated games. The lighting looks very fake. The textures are very raw and basic. The geometries are very primitive. The images are very pixelated and of poor CG quality. There are many subtitles in the footage. Overall, the video is unrealistic at all.",
@@ -283,14 +289,14 @@ if __name__ == "__main__":
             
         for variation in data.keys():
             prompt = data[variation]
-            hdmap = os.path.join(data_path, "hdmap", "ftheta_camera_front_wide_120fov", f"{sample_name}_0.mp4")
+            hdmap = os.path.join(data_path, "hdmap", args.camera_folder, f"{sample_name}_0.mp4")
             # make sure the file exists
             if not os.path.exists(hdmap):
                 print(f"hdmap file {hdmap} does not exist")
                 continue
 
             if "lidar" in control_inputs.keys():
-                lidar = os.path.join(data_path, "lidar", "ftheta_camera_front_wide_120fov", f"{sample_name}_0.mp4")
+                lidar = os.path.join(data_path, "lidar", args.camera_folder, f"{sample_name}_0.mp4")
                 if not os.path.exists(lidar):
                     print(f"lidar file {lidar} does not exist")
                     continue

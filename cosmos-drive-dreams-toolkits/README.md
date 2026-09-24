@@ -211,6 +211,22 @@ python render_from_rds_hq.py -i highway_random -o highway_random_render -d highw
 ```
 Use `--traffic dense,jam`, `--camera gantry`, `--min_lanes/--max_lanes` or `--mix_concentration` (lower = more varied vehicle mixes) to narrow or widen the variety.
 
+**Generating realistic videos.** Both scripts also write `captions/<clip_id>.json` with six prompts per clip (`clear_day`, `golden_hour`, `night`, `rain`, `snow`, `fog`) that describe the static camera view. Edit or delete entries to change what gets generated. Run the three steps from the repository root:
+```bash
+# 1. scenes + captions
+cd cosmos-drive-dreams-toolkits
+python generate_random_highway_scenes.py -o ../outputs/highway -n 10
+# 2. HD map + bounding box condition videos
+python render_from_rds_hq.py -i ../outputs/highway -o ../outputs/highway_render -d highway_fixed -c pinhole \
+    -cj ../outputs/highway/clip_ids.json --skip lidar --skip world_scenario
+cd ..
+# 3. one RGB video per clip and caption variation, with Cosmos-Transfer1-7B-Sample-AV
+PYTHONPATH="cosmos-transfer1" python scripts/generate_video_single_view.py \
+    --caption_path outputs/highway/captions --input_path outputs/highway_render \
+    --camera_folder pinhole_roadside_cam --video_save_folder outputs/highway_videos \
+    --checkpoint_dir checkpoints/ --is_av_sample --controlnet_specs assets/sample_av_hdmap_spec.json
+```
+
 > [!NOTE]
 > Cosmos-Transfer1-7B-Sample-AV is trained on ego-vehicle views, so an elevated static viewpoint is outside its training distribution and generation quality may vary.
 
