@@ -180,6 +180,13 @@ python render_from_rds_hq.py -i RDS_HQ_FOLDER -o OUTPUT_FOLDER -cj CLIP_ID -np N
 python create_fixed_camera_highway.py -o highway_demo --cam_height 8 --cam_y -16 --yaw 15 --pitch 12 --hfov 60
 python render_from_rds_hq.py -i highway_demo -o highway_demo_render -d highway_fixed -c pinhole --skip lidar --skip world_scenario
 ```
+Dense traffic on an 8-lane highway (4 lanes per direction, many trucks), seen from an overhead gantry:
+```bash
+python create_fixed_camera_highway.py -o highway_dense -c highway_8lanes_dense \
+    --num_lanes 4 --min_gap 4 --max_gap 15 --min_speed 14 --max_speed 20 --truck_ratio 0.35 \
+    --cam_y 0 --cam_height 10 --yaw 0 --pitch 20 --hfov 80
+python render_from_rds_hq.py -i highway_dense -o highway_dense_render -d highway_fixed -c pinhole --skip lidar --skip world_scenario
+```
 Run `python create_fixed_camera_highway.py --help` for all options (number of lanes, traffic density, truck ratio, clip length, ...). The camera config is `config/dataset_highway_fixed.json`.
 
 > [!NOTE]

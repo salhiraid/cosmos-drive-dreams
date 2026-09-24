@@ -73,29 +73,49 @@ def build_road(num_lanes, lane_width, median_width, x_min, x_max, step=2.0):
     return lanelines, road_boundaries, lane_centers
 
 
-def spawn_vehicles(lane_centers, num_frames, x_min, x_max, vehicles_per_lane, truck_ratio, rng):
-    """Constant-speed vehicles per lane, spaced so they don't overlap. Returns a list of vehicle dicts."""
+def sample_size(object_type, rng):
+    """Vary vehicle sizes a bit: sedans / SUVs for cars, box trucks / semi-trailers for trucks."""
+    if object_type == "Truck":
+        length = rng.choice([8.0, 12.0, 16.5]) + rng.uniform(-0.5, 0.5)
+        return [length, rng.uniform(2.4, 2.6), rng.uniform(3.2, 4.0)]
+    length, width, height = OBJECT_SIZES["Car"]
+    return [length + rng.uniform(-0.5, 0.6), width + rng.uniform(-0.1, 0.1), height + rng.uniform(-0.2, 0.3)]
+
+
+def spawn_vehicles(lane_centers, num_frames, x_min, x_max, min_gap, max_gap, min_speed, max_speed, truck_ratio, rng):
+    """
+    Fill every lane with constant-speed vehicles for the whole clip. min_gap / max_gap are bumper-to-bumper
+    distances in meters, so small values give dense traffic. Everyone in a lane drives at the same speed,
+    so vehicles never overlap. Trucks keep out of the innermost (fastest) lane when there are 3+ lanes.
+    Returns a list of vehicle dicts.
+    """
     duration = num_frames / FPS
+    lanes_per_side = len(lane_centers) // 2
     vehicles = []
     for lane_idx, (y, direction) in enumerate(lane_centers):
-        # slower traffic on the outer lanes
-        lane_rank = lane_idx % (len(lane_centers) // 2)
-        speed = rng.uniform(22, 28) + 3.0 * (len(lane_centers) // 2 - 1 - lane_rank)
+        # lane_rank 0 is next to the median (fast lane), outer lanes are slower
+        lane_rank = lane_idx % lanes_per_side
+        speed = rng.uniform(min_speed, max_speed) * (1.0 + 0.08 * (lanes_per_side - 1 - lane_rank))
+        lane_truck_ratio = 0.0 if (lanes_per_side >= 3 and lane_rank == 0) else truck_ratio
 
-        # everyone in a lane drives at the same speed, so the gaps stay constant
-        gaps = rng.uniform(25, 60, size=vehicles_per_lane)
+        # cover from far upstream (vehicles that will enter during the clip) to the end of the road
+        upstream = speed * duration
         entry = x_min if direction > 0 else x_max
-        offsets = np.cumsum(gaps) - rng.uniform(0, speed * duration)
-        for offset in offsets:
-            object_type = "Truck" if rng.random() < truck_ratio else "Car"
+        offset = -upstream + rng.uniform(0, max_gap)  # distance downstream of the entry point, front bumper
+        while offset < (x_max - x_min):
+            object_type = "Truck" if rng.random() < lane_truck_ratio else "Car"
+            lwh = sample_size(object_type, rng)
+            center = offset - lwh[0] / 2
             vehicles.append({
                 "type": object_type,
-                "lwh": OBJECT_SIZES[object_type],
+                "lwh": lwh,
                 "y": y + rng.normal(0, 0.15),
-                "x0": entry + direction * offset,
+                "x0": entry + direction * center,
                 "velocity": direction * speed,
                 "yaw": 0.0 if direction > 0 else np.pi,
             })
+            # next vehicle is further downstream: this one's length + a gap
+            offset += lwh[0] + rng.uniform(min_gap, max_gap)
     return vehicles
 
 
@@ -134,11 +154,14 @@ def hdmap_sample(clip_id, name, polylines):
 @click.option("--hfov", type=float, default=60.0, help="horizontal field of view in degrees")
 @click.option("--width", type=int, default=1280, help="image width")
 @click.option("--height", type=int, default=720, help="image height")
-@click.option("--vehicles_per_lane", type=int, default=8, help="number of vehicles spawned per lane")
-@click.option("--truck_ratio", type=float, default=0.15, help="fraction of vehicles that are trucks")
+@click.option("--min_gap", type=float, default=25.0, help="min bumper-to-bumper gap in meters (smaller = denser)")
+@click.option("--max_gap", type=float, default=60.0, help="max bumper-to-bumper gap in meters")
+@click.option("--min_speed", type=float, default=22.0, help="min lane speed in m/s (outer lanes)")
+@click.option("--max_speed", type=float, default=28.0, help="max lane speed in m/s")
+@click.option("--truck_ratio", type=float, default=0.15, help="fraction of vehicles that are trucks (outside the fast lane)")
 @click.option("--seed", type=int, default=0, help="random seed for traffic")
 def main(output_root, clip_id, num_frames, num_lanes, lane_width, median_width, cam_x, cam_y, cam_height,
-         yaw, pitch, hfov, width, height, vehicles_per_lane, truck_ratio, seed):
+         yaw, pitch, hfov, width, height, min_gap, max_gap, min_speed, max_speed, truck_ratio, seed):
     rng = np.random.default_rng(seed)
     x_min, x_max = cam_x - 300.0, cam_x + 700.0
 
@@ -162,7 +185,7 @@ def main(output_root, clip_id, num_frames, num_lanes, lane_width, median_width, 
     write_to_tar(hdmap_sample(clip_id, 'road_boundaries', road_boundaries), f"{output_root}/3d_road_boundaries/{clip_id}.tar")
 
     # 3. moving vehicles, one entry per frame
-    vehicles = spawn_vehicles(lane_centers, num_frames, x_min, x_max, vehicles_per_lane, truck_ratio, rng)
+    vehicles = spawn_vehicles(lane_centers, num_frames, x_min, x_max, min_gap, max_gap, min_speed, max_speed, truck_ratio, rng)
     object_sample = {'__key__': clip_id}
     for frame_idx in range(num_frames):
         t = frame_idx / FPS
