@@ -11,6 +11,8 @@ Output layout (under OUTPUT_ROOT):
     all_object_info/<clip_id>.tar    per-frame 3D cuboids of all vehicles
     3d_lanelines/<clip_id>.tar       lane divider polylines
     3d_road_boundaries/<clip_id>.tar road edge polylines
+    3d_poles/<clip_id>.tar           static roadside light poles and sign posts
+    3d_traffic_signs/<clip_id>.tar   static road signs (cuboids)
     captions/<clip_id>.json          text prompts for Cosmos-Transfer, one per weather / time-of-day variation
 
 World frame: x along the highway, y to the left, z up. The road surface is z = 0.
@@ -247,15 +249,44 @@ def make_captions(num_lanes, cam_y, cam_height, yaw, median_width, lane_width, m
     vehicles = ", ".join(common[:-1]) + (f" and {common[-1]}" if len(common) > 1 else common[0] if common else "vehicles")
 
     base = (f"{intro} It shows a straight {2 * num_lanes}-lane divided highway with a central "
-            f"median barrier and painted lane markings, with {traffic}. The traffic includes {vehicles}.")
+            f"median barrier, painted lane markings, street light poles and road signs along the roadside, "
+            f"with {traffic}. The traffic includes {vehicles}. The camera is completely static: the road, the lane "
+            f"markings, the poles and the signs stay fixed in the frame, and only the vehicles move.")
     return {name: f"{base} {weather}" for name, weather in CAPTION_VARIATIONS.items()}
 
 
-def hdmap_sample(clip_id, name, polylines):
+def build_landmarks(num_lanes, lane_width, median_width, shoulder_width, x_min, x_max, pole_spacing, sign_spacing,
+                    rng):
+    """
+    Static roadside landmarks: light poles along both road edges and in the median, and signs on posts.
+    They never move, which gives the video model a clear cue that the camera is static.
+    Returns (poles, traffic_signs): pole polylines [[bottom], [top]] and sign cuboids (8 vertices).
+    """
+    edge = median_width / 2 + num_lanes * lane_width + shoulder_width
+    poles, signs = [], []
+    if pole_spacing > 0:
+        for y in (-(edge + 1.0), edge + 1.0, 0.0):  # both roadsides and the median
+            for x in np.arange(x_min + rng.uniform(0, pole_spacing), x_max, pole_spacing):
+                x = x + rng.uniform(-2.0, 2.0)
+                poles.append([[x, y, 0.0], [x, y, rng.uniform(8.0, 11.0)]])
+    if sign_spacing > 0:
+        for side, facing in ((-1.0, -1.0), (1.0, 1.0)):  # signs face the traffic approaching on that side
+            y = side * (edge + 1.5)
+            for x in np.arange(x_min + rng.uniform(0, sign_spacing), x_max, sign_spacing):
+                width, height, bottom = rng.uniform(0.8, 2.5), rng.uniform(0.6, 1.8), rng.uniform(2.0, 3.0)
+                poles.append([[x, y, 0.0], [x, y, bottom + height]])  # the sign's post
+                y0, y1, x1, z0, z1 = y - width / 2, y + width / 2, x - facing * 0.05, bottom, bottom + height
+                # top face then bottom face, same corner order as the RDS-HQ traffic sign cuboids
+                signs.append([[x, y1, z1], [x, y0, z1], [x1, y0, z1], [x1, y1, z1],
+                              [x, y1, z0], [x, y0, z0], [x1, y0, z0], [x1, y1, z0]])
+    return poles, signs
+
+
+def hdmap_sample(clip_id, name, polylines, shape="polyline3d"):
     return {
         '__key__': clip_id,
         f'{name}.json': {
-            'labels': [{'labelData': {'shape3d': {'polyline3d': {'vertices': p}}}} for p in polylines]
+            'labels': [{'labelData': {'shape3d': {shape: {'vertices': p}}}} for p in polylines]
         },
     }
 
@@ -288,6 +319,8 @@ def hdmap_sample(clip_id, name, polylines):
 @click.option("--mix", type=str, default=DEFAULT_MIX, show_default=True,
               help=f"vehicle mix as name=weight pairs, names: {', '.join(VEHICLE_CLASSES)}")
 @click.option("--size_variation", type=float, default=0.2, help="random size variation per dimension (0.2 = +-20%)")
+@click.option("--pole_spacing", type=float, default=40.0, help="meters between roadside light poles (0 = none)")
+@click.option("--sign_spacing", type=float, default=150.0, help="meters between road signs on each side (0 = none)")
 @click.option("--seed", type=int, default=0, help="random seed for traffic")
 def main(parked, facing, **kwargs):
     defaults = {"shoulder_width": 3.5, "cam_height": 1.5, "pitch": 1.5, "hfov": 100.0} if parked else \
@@ -304,7 +337,7 @@ def main(parked, facing, **kwargs):
 def create_scene(output_root, clip_id, num_frames=121, num_lanes=3, lane_width=3.6, median_width=2.0,
                  shoulder_width=0.5, cam_x=0.0, cam_y=-16.0, cam_height=8.0, yaw=15.0, pitch=12.0, hfov=60.0, width=1280, height=720,
                  min_gap=25.0, max_gap=60.0, min_speed=22.0, max_speed=28.0, mix=DEFAULT_MIX, size_variation=0.2,
-                 seed=0):
+                 pole_spacing=40.0, sign_spacing=150.0, seed=0):
     """Write one clip in RDS-HQ format. `mix` is a 'name=weight,...' string or a {name: weight} dict."""
     rng = np.random.default_rng(seed)
     if isinstance(mix, str):
@@ -329,6 +362,10 @@ def create_scene(output_root, clip_id, num_frames=121, num_lanes=3, lane_width=3
     lanelines, road_boundaries, lane_centers = build_road(num_lanes, lane_width, median_width, x_min, x_max, shoulder_width)
     write_to_tar(hdmap_sample(clip_id, 'lanelines', lanelines), f"{output_root}/3d_lanelines/{clip_id}.tar")
     write_to_tar(hdmap_sample(clip_id, 'road_boundaries', road_boundaries), f"{output_root}/3d_road_boundaries/{clip_id}.tar")
+    poles, signs = build_landmarks(num_lanes, lane_width, median_width, shoulder_width, x_min, x_max, pole_spacing,
+                                   sign_spacing, np.random.default_rng(seed + 1))
+    write_to_tar(hdmap_sample(clip_id, 'poles', poles), f"{output_root}/3d_poles/{clip_id}.tar")
+    write_to_tar(hdmap_sample(clip_id, 'traffic_signs', signs, "cuboid3d"), f"{output_root}/3d_traffic_signs/{clip_id}.tar")
 
     # 3. moving vehicles, one entry per frame
     vehicles = spawn_vehicles(lane_centers, num_frames, x_min, x_max, min_gap, max_gap, min_speed, max_speed,

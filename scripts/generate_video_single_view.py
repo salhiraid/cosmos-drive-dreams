@@ -174,6 +174,12 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=1, help="Random seed")
     parser.add_argument("--num_gpus", type=int, default=1, help="Number of GPUs used to run inference in parallel.")
     parser.add_argument(
+        "--static_camera",
+        action="store_true",
+        help="Add camera motion (driving forward, panning, shaking) to the negative prompt, for scenes seen "
+        "from a fixed camera where only the vehicles should move",
+    )
+    parser.add_argument(
         "--helper_gpu",
         type=int,
         default=-1,
@@ -314,6 +320,11 @@ def demo(cfg,
 
 if __name__ == "__main__":
     args, control_inputs = parse_arguments()
+    if args.static_camera:
+        args.negative_prompt += (
+            " The camera is moving: it drives forward along the road, pans, rotates, zooms or shakes, so the road, "
+            "the lane markings and the roadside objects slide through the frame while the vehicles appear still."
+        )
 
     caption_path = os.path.abspath(args.caption_path)
     data_path = os.path.abspath(args.input_path)

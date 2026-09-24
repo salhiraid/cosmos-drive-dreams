@@ -198,6 +198,11 @@ python render_from_rds_hq.py -i highway_parked -o highway_parked_render -d highw
 ```
 The condition videos are then in `highway_parked_render/hdmap/ftheta_roadside_cam/`, so pass `--camera_folder ftheta_roadside_cam` to `generate_video_single_view.py`. `generate_random_highway_scenes.py --camera parked` generates random parked-car scenes.
 
+**Keeping the camera static.** Cosmos-Transfer1-7B-Sample-AV was trained on driving footage, so with a fixed camera it may move the camera instead of the vehicles. The scene scripts therefore add static roadside landmarks (light poles every `--pole_spacing` m and road signs every `--sign_spacing` m) and captions that say the camera is static. Pass `--static_camera` to `scripts/generate_video_single_view.py` to put camera motion in the negative prompt, and check the results with `scripts/check_static_camera.py`, which measures how far the background drifts and can move failing videos aside:
+```bash
+python scripts/check_static_camera.py -i outputs/parked_videos --threshold 8 --move_to outputs/parked_videos_moving
+```
+
 **Vehicle types.** `--mix` sets the share of each type. Every box size is drawn per dimension within `+-size_variation` (default 20%) of the standard size:
 
 | Subtype | Standard L x W x H (m) | Rendered as |

@@ -5,7 +5,9 @@
   },
   "MINIMAP_TYPES": [
     "lanelines",
-    "road_boundaries"
+    "road_boundaries",
+    "poles",
+    "traffic_signs"
   ],
   "INPUT_POSE_FPS": 30,
   "INPUT_LIDAR_FPS": 10,
