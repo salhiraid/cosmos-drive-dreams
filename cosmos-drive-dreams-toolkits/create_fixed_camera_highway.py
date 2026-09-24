@@ -11,9 +11,13 @@ Output layout (under OUTPUT_ROOT):
     all_object_info/<clip_id>.tar    per-frame 3D cuboids of all vehicles
     3d_lanelines/<clip_id>.tar       lane divider polylines
     3d_road_boundaries/<clip_id>.tar road edge polylines
+    captions/<clip_id>.json          text prompts for Cosmos-Transfer, one per weather / time-of-day variation
 
 World frame: x along the highway, y to the left, z up. The road surface is z = 0.
 """
+import json
+from pathlib import Path
+
 import click
 import numpy as np
 
@@ -173,6 +177,53 @@ def object_to_world(x, y, z, yaw):
     return transform
 
 
+CAPTION_VARIATIONS = {
+    "clear_day": "It is a bright sunny day with a clear blue sky, crisp shadows under the vehicles and dry asphalt.",
+    "golden_hour": "It is late afternoon at golden hour; low warm sunlight casts long shadows across the lanes.",
+    "night": "It is night; the highway is lit by orange sodium street lights, and vehicles show bright headlights "
+             "and red tail lights reflecting on the road.",
+    "rain": "It is raining heavily under a dark overcast sky; the road surface is wet and reflective, "
+            "vehicles throw up spray, and raindrops streak past the camera.",
+    "snow": "It is snowing; snow covers the roadside and median, the lanes are slushy with tire tracks, "
+            "and visibility is reduced.",
+    "fog": "Dense fog covers the highway; distant vehicles fade into the grey haze and only nearby vehicles are clear.",
+}
+
+VEHICLE_WORDS = {
+    "car": "cars", "pickup": "pickup trucks", "motorcycle": "motorcycles", "truck": "box trucks",
+    "semi_truck": "semi-trailer trucks", "car_trailer": "cars towing trailers",
+}
+
+
+def make_captions(num_lanes, cam_y, cam_height, yaw, median_width, lane_width, min_gap, max_gap, min_speed,
+                  max_speed, mix):
+    """Text prompts for Cosmos-Transfer, one per weather / time-of-day variation, describing the static camera view."""
+    half_road = median_width / 2 + num_lanes * lane_width
+    if abs(cam_y) <= half_road:
+        mount = f"on an overhead sign gantry about {cam_height:.0f} meters above the highway"
+    else:
+        mount = f"on a tall pole beside the highway, about {cam_height:.0f} meters above the road"
+    facing = "looking along the direction of traffic" if np.cos(np.deg2rad(yaw)) > 0 else "looking towards oncoming traffic"
+
+    mean_gap, mean_speed = (min_gap + max_gap) / 2, (min_speed + max_speed) / 2
+    if mean_speed < 10:
+        traffic = "a traffic jam: vehicles are packed bumper to bumper and crawl slowly"
+    elif mean_gap < 20:
+        traffic = "heavy, dense traffic with short gaps between vehicles"
+    elif mean_gap < 45:
+        traffic = "moderate traffic flowing steadily"
+    else:
+        traffic = "light, free-flowing traffic at highway speed"
+
+    common = [VEHICLE_WORDS[name] for name, weight in sorted(mix.items(), key=lambda kv: -kv[1]) if weight >= 0.05]
+    vehicles = ", ".join(common[:-1]) + (f" and {common[-1]}" if len(common) > 1 else common[0] if common else "vehicles")
+
+    base = (f"The video is recorded by a static traffic surveillance camera mounted {mount}, {facing}. "
+            f"The camera does not move. It shows a straight {2 * num_lanes}-lane divided highway with a central "
+            f"median barrier and painted lane markings, with {traffic}. The traffic includes {vehicles}.")
+    return {name: f"{base} {weather}" for name, weather in CAPTION_VARIATIONS.items()}
+
+
 def hdmap_sample(clip_id, name, polylines):
     return {
         '__key__': clip_id,
@@ -261,6 +312,14 @@ def create_scene(output_root, clip_id, num_frames=121, num_lanes=3, lane_width=3
                 frame_objects[v["track_id"]]['towed_by'] = v["towed_by"]
         object_sample[f"{frame_idx:06d}.all_object_info.json"] = frame_objects
     write_to_tar(object_sample, f"{output_root}/all_object_info/{clip_id}.tar")
+
+    # 4. text prompts for Cosmos-Transfer (one per weather / time-of-day variation)
+    captions = make_captions(num_lanes, cam_y, cam_height, yaw, median_width, lane_width, min_gap, max_gap,
+                             min_speed, max_speed, mix)
+    caption_file = Path(output_root) / "captions" / f"{clip_id}.json"
+    caption_file.parent.mkdir(parents=True, exist_ok=True)
+    with open(caption_file, "w") as f:
+        json.dump(captions, f, indent=4)
 
 
 if __name__ == "__main__":
