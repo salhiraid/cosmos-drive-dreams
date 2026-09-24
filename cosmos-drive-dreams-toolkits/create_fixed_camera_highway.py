@@ -65,9 +65,10 @@ def look_at_camera_to_world(position, yaw_deg, pitch_deg):
     return camera_to_world
 
 
-def build_road(num_lanes, lane_width, median_width, x_min, x_max, step=2.0):
+def build_road(num_lanes, lane_width, median_width, x_min, x_max, shoulder_width=0.5, step=2.0):
     """
-    Two carriageways separated by a median. Returns (lanelines, road_boundaries, lane_centers).
+    Two carriageways separated by a median, with a paved shoulder of shoulder_width meters outside the last lane.
+    Returns (lanelines, road_boundaries, lane_centers).
     lane_centers: list of (y_center, direction) where direction = +1 drives towards +x, -1 towards -x.
     Right-hand traffic: +x traffic is on the -y side.
     """
@@ -84,9 +85,24 @@ def build_road(num_lanes, lane_width, median_width, x_min, x_max, step=2.0):
         for i in range(num_lanes):
             lane_centers.append((inner + side * (i + 0.5) * lane_width, direction))
         road_boundaries.append(polyline(inner - side * 0.5))
-        road_boundaries.append(polyline(inner + side * (num_lanes * lane_width + 0.5)))
+        road_boundaries.append(polyline(inner + side * (num_lanes * lane_width + shoulder_width)))
 
     return lanelines, road_boundaries, lane_centers
+
+
+def parked_camera(side, facing, num_lanes, lane_width, median_width, shoulder_width):
+    """
+    Camera of a car parked on the outer shoulder, like an ego vehicle's front camera but standing still.
+    side: 'right' (the -y edge, next to the +x carriageway) or 'left' (the +y edge, next to the -x carriageway).
+    facing: 'with_traffic' looks the way the adjacent lanes drive (vehicles overtake and drive away),
+            'against_traffic' looks at the adjacent lanes' oncoming vehicles (they approach and pass by).
+    Returns (cam_y, yaw_deg).
+    """
+    sign = -1.0 if side == "right" else 1.0
+    cam_y = sign * (median_width / 2 + num_lanes * lane_width + shoulder_width / 2)
+    adjacent_direction = 1.0 if side == "right" else -1.0
+    looks_along_x = adjacent_direction if facing == "with_traffic" else -adjacent_direction
+    return cam_y, 0.0 if looks_along_x > 0 else 180.0
 
 
 def parse_mix(mix):
@@ -199,11 +215,23 @@ def make_captions(num_lanes, cam_y, cam_height, yaw, median_width, lane_width, m
                   max_speed, mix):
     """Text prompts for Cosmos-Transfer, one per weather / time-of-day variation, describing the static camera view."""
     half_road = median_width / 2 + num_lanes * lane_width
-    if abs(cam_y) <= half_road:
-        mount = f"on an overhead sign gantry about {cam_height:.0f} meters above the highway"
+    looks_along_x = np.cos(np.deg2rad(yaw)) > 0
+    if abs(cam_y) > half_road and cam_height < 4.0:
+        # car parked on the shoulder
+        side = "right" if cam_y < 0 else "left"
+        with_traffic = looks_along_x == (cam_y < 0)  # right-hand traffic: the -y carriageway drives towards +x
+        view = ("vehicles in the nearest lanes overtake the parked car and drive away from the camera"
+                if with_traffic else "vehicles in the nearest lanes approach head-on and pass close by the parked car")
+        intro = (f"The video is captured by the front camera of a car parked on the {side} shoulder of a highway. "
+                 f"The car is stationary, so the camera does not move, while traffic passes by: {view}.")
     else:
-        mount = f"on a tall pole beside the highway, about {cam_height:.0f} meters above the road"
-    facing = "looking along the direction of traffic" if np.cos(np.deg2rad(yaw)) > 0 else "looking towards oncoming traffic"
+        if abs(cam_y) <= half_road:
+            mount = f"on an overhead sign gantry about {cam_height:.0f} meters above the highway"
+        else:
+            mount = f"on a tall pole beside the highway, about {cam_height:.0f} meters above the road"
+        facing = "looking along the direction of traffic" if looks_along_x else "looking towards oncoming traffic"
+        intro = (f"The video is recorded by a static traffic surveillance camera mounted {mount}, {facing}. "
+                 f"The camera does not move.")
 
     mean_gap, mean_speed = (min_gap + max_gap) / 2, (min_speed + max_speed) / 2
     if mean_speed < 10:
@@ -218,8 +246,7 @@ def make_captions(num_lanes, cam_y, cam_height, yaw, median_width, lane_width, m
     common = [VEHICLE_WORDS[name] for name, weight in sorted(mix.items(), key=lambda kv: -kv[1]) if weight >= 0.05]
     vehicles = ", ".join(common[:-1]) + (f" and {common[-1]}" if len(common) > 1 else common[0] if common else "vehicles")
 
-    base = (f"The video is recorded by a static traffic surveillance camera mounted {mount}, {facing}. "
-            f"The camera does not move. It shows a straight {2 * num_lanes}-lane divided highway with a central "
+    base = (f"{intro} It shows a straight {2 * num_lanes}-lane divided highway with a central "
             f"median barrier and painted lane markings, with {traffic}. The traffic includes {vehicles}.")
     return {name: f"{base} {weather}" for name, weather in CAPTION_VARIATIONS.items()}
 
@@ -240,12 +267,18 @@ def hdmap_sample(clip_id, name, polylines):
 @click.option("--num_lanes", type=int, default=3, help="lanes per direction")
 @click.option("--lane_width", type=float, default=3.6, help="lane width in meters")
 @click.option("--median_width", type=float, default=2.0, help="median width in meters")
+@click.option("--shoulder_width", type=float, default=None,
+              help="paved shoulder outside the last lane in meters (default 0.5, or 3.5 with --parked)")
+@click.option("--parked", type=click.Choice(["right", "left"]), default=None,
+              help="camera of a stationary car parked on the right / left shoulder (ego-car view); sets cam_y and yaw")
+@click.option("--facing", type=click.Choice(["with_traffic", "against_traffic"]), default="with_traffic",
+              help="with --parked: look the way the adjacent lanes drive, or towards their oncoming vehicles")
 @click.option("--cam_x", type=float, default=0.0, help="camera position along the highway (m)")
 @click.option("--cam_y", type=float, default=-16.0, help="camera lateral position (m), negative = right shoulder")
-@click.option("--cam_height", type=float, default=8.0, help="camera height above the road (m)")
+@click.option("--cam_height", type=float, default=None, help="camera height above the road (m) (default 8, or 1.5 with --parked)")
 @click.option("--yaw", type=float, default=15.0, help="camera heading in degrees, 0 = looking down the highway (+x)")
-@click.option("--pitch", type=float, default=12.0, help="camera downward tilt in degrees")
-@click.option("--hfov", type=float, default=60.0, help="horizontal field of view in degrees")
+@click.option("--pitch", type=float, default=None, help="camera downward tilt in degrees (default 12, or 1.5 with --parked)")
+@click.option("--hfov", type=float, default=None, help="horizontal field of view in degrees (default 60, or 100 with --parked)")
 @click.option("--width", type=int, default=1280, help="image width")
 @click.option("--height", type=int, default=720, help="image height")
 @click.option("--min_gap", type=float, default=25.0, help="min bumper-to-bumper gap in meters (smaller = denser)")
@@ -256,12 +289,20 @@ def hdmap_sample(clip_id, name, polylines):
               help=f"vehicle mix as name=weight pairs, names: {', '.join(VEHICLE_CLASSES)}")
 @click.option("--size_variation", type=float, default=0.2, help="random size variation per dimension (0.2 = +-20%)")
 @click.option("--seed", type=int, default=0, help="random seed for traffic")
-def main(**kwargs):
+def main(parked, facing, **kwargs):
+    defaults = {"shoulder_width": 3.5, "cam_height": 1.5, "pitch": 1.5, "hfov": 100.0} if parked else \
+               {"shoulder_width": 0.5, "cam_height": 8.0, "pitch": 12.0, "hfov": 60.0}
+    for name, value in defaults.items():
+        if kwargs[name] is None:
+            kwargs[name] = value
+    if parked:
+        kwargs["cam_y"], kwargs["yaw"] = parked_camera(parked, facing, kwargs["num_lanes"], kwargs["lane_width"],
+                                                       kwargs["median_width"], kwargs["shoulder_width"])
     create_scene(**kwargs)
 
 
 def create_scene(output_root, clip_id, num_frames=121, num_lanes=3, lane_width=3.6, median_width=2.0,
-                 cam_x=0.0, cam_y=-16.0, cam_height=8.0, yaw=15.0, pitch=12.0, hfov=60.0, width=1280, height=720,
+                 shoulder_width=0.5, cam_x=0.0, cam_y=-16.0, cam_height=8.0, yaw=15.0, pitch=12.0, hfov=60.0, width=1280, height=720,
                  min_gap=25.0, max_gap=60.0, min_speed=22.0, max_speed=28.0, mix=DEFAULT_MIX, size_variation=0.2,
                  seed=0):
     """Write one clip in RDS-HQ format. `mix` is a 'name=weight,...' string or a {name: weight} dict."""
@@ -285,7 +326,7 @@ def create_scene(output_root, clip_id, num_frames=121, num_lanes=3, lane_width=3
     write_to_tar(intrinsic_sample, f"{output_root}/pinhole_intrinsic/{clip_id}.tar")
 
     # 2. static map
-    lanelines, road_boundaries, lane_centers = build_road(num_lanes, lane_width, median_width, x_min, x_max)
+    lanelines, road_boundaries, lane_centers = build_road(num_lanes, lane_width, median_width, x_min, x_max, shoulder_width)
     write_to_tar(hdmap_sample(clip_id, 'lanelines', lanelines), f"{output_root}/3d_lanelines/{clip_id}.tar")
     write_to_tar(hdmap_sample(clip_id, 'road_boundaries', road_boundaries), f"{output_root}/3d_road_boundaries/{clip_id}.tar")
 

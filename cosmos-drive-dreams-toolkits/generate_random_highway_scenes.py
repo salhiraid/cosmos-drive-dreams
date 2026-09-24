@@ -17,7 +17,7 @@ from pathlib import Path
 import click
 import numpy as np
 
-from create_fixed_camera_highway import DEFAULT_MIX, VEHICLE_CLASSES, create_scene, parse_mix
+from create_fixed_camera_highway import DEFAULT_MIX, VEHICLE_CLASSES, create_scene, parked_camera, parse_mix
 
 # traffic regimes: bumper-to-bumper gap range (m) and lane speed range (m/s)
 TRAFFIC_LEVELS = {
@@ -26,7 +26,7 @@ TRAFFIC_LEVELS = {
     "dense":     {"gap": (5.0, 18.0),  "speed": (13.0, 22.0)},
     "jam":       {"gap": (2.0, 6.0),   "speed": (2.0, 8.0)},
 }
-CAMERA_MOUNTS = ["gantry", "pole"]
+CAMERA_MOUNTS = ["gantry", "pole", "parked"]
 
 
 def sample_range(rng, low_high, min_width=0.0):
@@ -44,8 +44,21 @@ def sample_mix(rng, concentration):
     return {name: round(float(w), 4) for name, w in zip(VEHICLE_CLASSES, weights)}
 
 
-def sample_camera(rng, mount, num_lanes, lane_width, median_width):
+def sample_camera(rng, mount, num_lanes, lane_width, median_width, shoulder_width):
     half_road = median_width / 2 + num_lanes * lane_width
+    if mount == "parked":
+        # front camera of a car standing on the outer shoulder, like an ego-vehicle view
+        side = str(rng.choice(["right", "left"]))
+        facing = str(rng.choice(["with_traffic", "against_traffic"]))
+        cam_y, yaw = parked_camera(side, facing, num_lanes, lane_width, median_width, shoulder_width)
+        return {
+            "cam_x": 0.0,
+            "cam_y": round(float(cam_y + rng.uniform(-0.4, 0.4)), 2),
+            "cam_height": round(float(rng.uniform(1.3, 2.2)), 2),
+            "yaw": round(float(yaw + rng.uniform(-4.0, 4.0)), 2),
+            "pitch": round(float(rng.uniform(0.0, 4.0)), 2),
+            "hfov": round(float(rng.uniform(90.0, 120.0)), 2),
+        }
     # look along traffic (+x) or against it (-x)
     base_yaw = 0.0 if rng.random() < 0.7 else 180.0
     if mount == "gantry":
@@ -82,6 +95,8 @@ def sample_scene(rng, min_lanes, max_lanes, traffic_levels, camera_mounts, mix_c
     min_gap, max_gap = sample_range(rng, TRAFFIC_LEVELS[level]["gap"], min_width=2.0)
     min_speed, max_speed = sample_range(rng, TRAFFIC_LEVELS[level]["speed"], min_width=1.0)
     mount = str(rng.choice(camera_mounts))
+    # a car parked on the shoulder needs a wide shoulder, otherwise a narrow paved edge
+    shoulder_width = float(rng.uniform(3.0, 4.5)) if mount == "parked" else float(rng.uniform(0.5, 2.5))
 
     return {
         "traffic_level": level,
@@ -89,13 +104,14 @@ def sample_scene(rng, min_lanes, max_lanes, traffic_levels, camera_mounts, mix_c
         "num_lanes": num_lanes,
         "lane_width": round(lane_width, 2),
         "median_width": round(median_width, 2),
+        "shoulder_width": round(shoulder_width, 2),
         "min_gap": round(min_gap, 2),
         "max_gap": round(max_gap, 2),
         "min_speed": round(min_speed, 2),
         "max_speed": round(max_speed, 2),
         "mix": sample_mix(rng, mix_concentration),
         "size_variation": round(float(rng.uniform(min_size_variation, max_size_variation)), 3),
-        **sample_camera(rng, mount, num_lanes, lane_width, median_width),
+        **sample_camera(rng, mount, num_lanes, lane_width, median_width, shoulder_width),
         "seed": int(rng.integers(0, 2**31 - 1)),
     }
 
