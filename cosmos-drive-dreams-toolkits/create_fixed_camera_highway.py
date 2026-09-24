@@ -23,10 +23,22 @@ CAMERA_NAME = "roadside_cam"
 FPS = 30
 
 # length, width, height in meters
-OBJECT_SIZES = {
-    "Car": [4.6, 1.9, 1.6],
-    "Truck": [16.0, 2.6, 3.8],
+# Vehicle subtypes. 'lwh' is the standard size (length, width, height in meters), randomized by
+# --size_variation. 'object_type' is the class the renderer understands (see config/hdmap_color_config.json),
+# the fine-grained subtype is stored in 'object_subtype'. 'heavy' vehicles stay out of the fast lane.
+VEHICLE_CLASSES = {
+    "car":         {"lwh": [4.5, 1.8, 1.5],   "object_type": "Car",     "heavy": False},
+    "pickup":      {"lwh": [5.5, 2.0, 1.9],   "object_type": "Car",     "heavy": False},
+    "motorcycle":  {"lwh": [2.2, 0.8, 1.5],   "object_type": "Cyclist", "heavy": False},
+    "truck":       {"lwh": [9.0, 2.5, 3.5],   "object_type": "Truck",   "heavy": True},
+    "semi_truck":  {"lwh": [16.5, 2.55, 4.0], "object_type": "Truck",   "heavy": True},
+    # car towing a trailer: two boxes, the car ('car') and the trailer ('trailer') behind it
+    "car_trailer": {"lwh": [4.7, 1.85, 1.6],  "object_type": "Car",     "heavy": True},
 }
+TRAILER = {"lwh": [4.0, 2.0, 1.9], "object_type": "Trailer"}  # the renderer draws 'Trailer' as a Truck
+HITCH_GAP = 1.0  # meters between the car's rear bumper and the trailer's front
+
+DEFAULT_MIX = "car=0.45,pickup=0.15,motorcycle=0.08,truck=0.10,semi_truck=0.12,car_trailer=0.10"
 
 
 def look_at_camera_to_world(position, yaw_deg, pitch_deg):
@@ -73,30 +85,81 @@ def build_road(num_lanes, lane_width, median_width, x_min, x_max, step=2.0):
     return lanelines, road_boundaries, lane_centers
 
 
-def spawn_vehicles(lane_centers, num_frames, x_min, x_max, vehicles_per_lane, truck_ratio, rng):
-    """Constant-speed vehicles per lane, spaced so they don't overlap. Returns a list of vehicle dicts."""
-    duration = num_frames / FPS
-    vehicles = []
-    for lane_idx, (y, direction) in enumerate(lane_centers):
-        # slower traffic on the outer lanes
-        lane_rank = lane_idx % (len(lane_centers) // 2)
-        speed = rng.uniform(22, 28) + 3.0 * (len(lane_centers) // 2 - 1 - lane_rank)
+def parse_mix(mix):
+    """'car=0.5,truck=0.2' -> {'car': 0.5, 'truck': 0.2}, normalized to sum to 1."""
+    weights = {}
+    for item in mix.split(","):
+        name, weight = item.split("=")
+        name = name.strip()
+        if name not in VEHICLE_CLASSES:
+            raise click.BadParameter(f"unknown vehicle '{name}', choose from {list(VEHICLE_CLASSES)}")
+        weights[name] = float(weight)
+    total = sum(weights.values())
+    return {name: weight / total for name, weight in weights.items()}
 
-        # everyone in a lane drives at the same speed, so the gaps stay constant
-        gaps = rng.uniform(25, 60, size=vehicles_per_lane)
+
+def random_size(standard_lwh, variation, rng):
+    """Each dimension is drawn uniformly within +-variation (e.g. 0.2 = +-20%) of the standard size."""
+    return (np.array(standard_lwh) * (1.0 + rng.uniform(-variation, variation, size=3))).tolist()
+
+
+def spawn_vehicles(lane_centers, num_frames, x_min, x_max, min_gap, max_gap, min_speed, max_speed, mix,
+                   size_variation, rng):
+    """
+    Fill every lane with constant-speed vehicles for the whole clip. min_gap / max_gap are bumper-to-bumper
+    distances in meters, so small values give dense traffic. Everyone in a lane drives at the same speed,
+    so vehicles never overlap. Heavy vehicles keep out of the innermost (fastest) lane when there are 3+ lanes.
+    Returns a list of objects (a car with a trailer gives two objects).
+    """
+    duration = num_frames / FPS
+    lanes_per_side = len(lane_centers) // 2
+    light_mix = {k: w for k, w in mix.items() if not VEHICLE_CLASSES[k]["heavy"]} or mix
+    objects = []
+    for lane_idx, (y, direction) in enumerate(lane_centers):
+        # lane_rank 0 is next to the median (fast lane), outer lanes are slower
+        lane_rank = lane_idx % lanes_per_side
+        speed = rng.uniform(min_speed, max_speed) * (1.0 + 0.08 * (lanes_per_side - 1 - lane_rank))
+        lane_mix = light_mix if (lanes_per_side >= 3 and lane_rank == 0) else mix
+        names, weights = list(lane_mix), np.array(list(lane_mix.values()))
+        weights = weights / weights.sum()
+
+        # cover from far upstream (vehicles that will enter during the clip) to the end of the road
+        upstream = speed * duration
         entry = x_min if direction > 0 else x_max
-        offsets = np.cumsum(gaps) - rng.uniform(0, speed * duration)
-        for offset in offsets:
-            object_type = "Truck" if rng.random() < truck_ratio else "Car"
-            vehicles.append({
-                "type": object_type,
-                "lwh": OBJECT_SIZES[object_type],
-                "y": y + rng.normal(0, 0.15),
-                "x0": entry + direction * offset,
-                "velocity": direction * speed,
-                "yaw": 0.0 if direction > 0 else np.pi,
-            })
-    return vehicles
+        front_of_previous = -upstream  # distance downstream of the entry point
+        while front_of_previous < (x_max - x_min):
+            subtype = rng.choice(names, p=weights)
+            vehicle_class = VEHICLE_CLASSES[subtype]
+            # motorcycles wander more inside the lane
+            lateral = y + rng.normal(0, 0.4 if subtype == "motorcycle" else 0.15)
+
+            lwh = random_size(vehicle_class["lwh"], size_variation, rng)
+            trailer_lwh = random_size(TRAILER["lwh"], size_variation, rng) if subtype == "car_trailer" else None
+            total_length = lwh[0] + (HITCH_GAP + trailer_lwh[0] if trailer_lwh else 0.0)
+
+            # this vehicle's rear (or its trailer's rear) is a gap ahead of the previous vehicle's front
+            front = front_of_previous + rng.uniform(min_gap, max_gap) + total_length
+            front_of_previous = front
+
+            def add(object_type, object_subtype, size, object_front, extra=None):
+                center = object_front - size[0] / 2
+                objects.append({
+                    "track_id": f"{len(objects):05d}",
+                    "type": object_type,
+                    "subtype": object_subtype,
+                    "lwh": size,
+                    "y": lateral,
+                    "x0": entry + direction * center,
+                    "velocity": direction * speed,
+                    "yaw": 0.0 if direction > 0 else np.pi,
+                    **(extra or {}),
+                })
+
+            add(vehicle_class["object_type"], subtype, lwh, front)
+            if trailer_lwh:
+                add(TRAILER["object_type"], "trailer", trailer_lwh, front - lwh[0] - HITCH_GAP,
+                    {"towed_by": objects[-1]["track_id"]})
+    return objects
 
 
 def object_to_world(x, y, z, yaw):
@@ -134,12 +197,26 @@ def hdmap_sample(clip_id, name, polylines):
 @click.option("--hfov", type=float, default=60.0, help="horizontal field of view in degrees")
 @click.option("--width", type=int, default=1280, help="image width")
 @click.option("--height", type=int, default=720, help="image height")
-@click.option("--vehicles_per_lane", type=int, default=8, help="number of vehicles spawned per lane")
-@click.option("--truck_ratio", type=float, default=0.15, help="fraction of vehicles that are trucks")
+@click.option("--min_gap", type=float, default=25.0, help="min bumper-to-bumper gap in meters (smaller = denser)")
+@click.option("--max_gap", type=float, default=60.0, help="max bumper-to-bumper gap in meters")
+@click.option("--min_speed", type=float, default=22.0, help="min lane speed in m/s (outer lanes)")
+@click.option("--max_speed", type=float, default=28.0, help="max lane speed in m/s")
+@click.option("--mix", type=str, default=DEFAULT_MIX, show_default=True,
+              help=f"vehicle mix as name=weight pairs, names: {', '.join(VEHICLE_CLASSES)}")
+@click.option("--size_variation", type=float, default=0.2, help="random size variation per dimension (0.2 = +-20%)")
 @click.option("--seed", type=int, default=0, help="random seed for traffic")
-def main(output_root, clip_id, num_frames, num_lanes, lane_width, median_width, cam_x, cam_y, cam_height,
-         yaw, pitch, hfov, width, height, vehicles_per_lane, truck_ratio, seed):
+def main(**kwargs):
+    create_scene(**kwargs)
+
+
+def create_scene(output_root, clip_id, num_frames=121, num_lanes=3, lane_width=3.6, median_width=2.0,
+                 cam_x=0.0, cam_y=-16.0, cam_height=8.0, yaw=15.0, pitch=12.0, hfov=60.0, width=1280, height=720,
+                 min_gap=25.0, max_gap=60.0, min_speed=22.0, max_speed=28.0, mix=DEFAULT_MIX, size_variation=0.2,
+                 seed=0):
+    """Write one clip in RDS-HQ format. `mix` is a 'name=weight,...' string or a {name: weight} dict."""
     rng = np.random.default_rng(seed)
+    if isinstance(mix, str):
+        mix = parse_mix(mix)
     x_min, x_max = cam_x - 300.0, cam_x + 700.0
 
     # 1. camera: same pose for every frame
@@ -162,21 +239,26 @@ def main(output_root, clip_id, num_frames, num_lanes, lane_width, median_width, 
     write_to_tar(hdmap_sample(clip_id, 'road_boundaries', road_boundaries), f"{output_root}/3d_road_boundaries/{clip_id}.tar")
 
     # 3. moving vehicles, one entry per frame
-    vehicles = spawn_vehicles(lane_centers, num_frames, x_min, x_max, vehicles_per_lane, truck_ratio, rng)
+    vehicles = spawn_vehicles(lane_centers, num_frames, x_min, x_max, min_gap, max_gap, min_speed, max_speed,
+                              mix, size_variation, rng)
     object_sample = {'__key__': clip_id}
     for frame_idx in range(num_frames):
         t = frame_idx / FPS
         frame_objects = {}
-        for track_id, v in enumerate(vehicles):
+        for v in vehicles:
             x = v["x0"] + v["velocity"] * t
             if not (x_min <= x <= x_max):
                 continue
-            frame_objects[f"{track_id:04d}"] = {
+            frame_objects[v["track_id"]] = {
                 'object_to_world': object_to_world(x, v["y"], v["lwh"][2] / 2, v["yaw"]).tolist(),
                 'object_lwh': v["lwh"],
                 'object_is_moving': True,
                 'object_type': v["type"],
+                'object_subtype': v["subtype"],
+                'object_velocity': [v["velocity"], 0.0, 0.0],  # world frame, m/s
             }
+            if "towed_by" in v:
+                frame_objects[v["track_id"]]['towed_by'] = v["towed_by"]
         object_sample[f"{frame_idx:06d}.all_object_info.json"] = frame_objects
     write_to_tar(object_sample, f"{output_root}/all_object_info/{clip_id}.tar")
 

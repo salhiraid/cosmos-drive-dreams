@@ -180,7 +180,36 @@ python render_from_rds_hq.py -i RDS_HQ_FOLDER -o OUTPUT_FOLDER -cj CLIP_ID -np N
 python create_fixed_camera_highway.py -o highway_demo --cam_height 8 --cam_y -16 --yaw 15 --pitch 12 --hfov 60
 python render_from_rds_hq.py -i highway_demo -o highway_demo_render -d highway_fixed -c pinhole --skip lidar --skip world_scenario
 ```
-Run `python create_fixed_camera_highway.py --help` for all options (number of lanes, traffic density, truck ratio, clip length, ...). The camera config is `config/dataset_highway_fixed.json`.
+Dense traffic on an 8-lane highway (4 lanes per direction), seen from an overhead gantry:
+```bash
+python create_fixed_camera_highway.py -o highway_dense -c highway_8lanes_dense \
+    --num_lanes 4 --min_gap 4 --max_gap 15 --min_speed 14 --max_speed 20 \
+    --mix "car=0.4,pickup=0.15,motorcycle=0.1,truck=0.1,semi_truck=0.15,car_trailer=0.1" --size_variation 0.2 \
+    --cam_y 0 --cam_height 10 --yaw 0 --pitch 20 --hfov 80
+python render_from_rds_hq.py -i highway_dense -o highway_dense_render -d highway_fixed -c pinhole --skip lidar --skip world_scenario
+```
+Run `python create_fixed_camera_highway.py --help` for all options (number of lanes, traffic density, vehicle mix, clip length, ...). The camera config is `config/dataset_highway_fixed.json`.
+
+**Vehicle types.** `--mix` sets the share of each type. Every box size is drawn per dimension within `+-size_variation` (default 20%) of the standard size:
+
+| Subtype | Standard L x W x H (m) | Rendered as |
+|---|---|---|
+| `car` | 4.5 x 1.8 x 1.5 | Car |
+| `pickup` | 5.5 x 2.0 x 1.9 | Car |
+| `motorcycle` | 2.2 x 0.8 x 1.5 | Cyclist |
+| `truck` | 9.0 x 2.5 x 3.5 | Truck |
+| `semi_truck` | 16.5 x 2.55 x 4.0 | Truck |
+| `car_trailer` | car 4.7 x 1.85 x 1.6 + trailer 4.0 x 2.0 x 1.9 | Car + Truck |
+
+Besides the fields the renderer uses, each object in `all_object_info` carries `object_subtype`, `object_velocity` (m/s, world frame) and, for trailers, `towed_by` (the track id of the towing car).
+
+**Random batches.** `generate_random_highway_scenes.py` generates many clips, each with its own random number of lanes, traffic level (`free_flow`, `moderate`, `dense`, `jam`), speeds, vehicle mix, size variation and camera placement (gantry or pole, looking with or against traffic). Each clip's parameters are saved to `scene_params/<clip_id>.json`.
+```bash
+python generate_random_highway_scenes.py -o highway_random -n 50 --seed 0
+python render_from_rds_hq.py -i highway_random -o highway_random_render -d highway_fixed -c pinhole \
+    -cj highway_random/clip_ids.json --skip lidar --skip world_scenario
+```
+Use `--traffic dense,jam`, `--camera gantry`, `--min_lanes/--max_lanes` or `--mix_concentration` (lower = more varied vehicle mixes) to narrow or widen the variety.
 
 > [!NOTE]
 > Cosmos-Transfer1-7B-Sample-AV is trained on ego-vehicle views, so an elevated static viewpoint is outside its training distribution and generation quality may vary.
