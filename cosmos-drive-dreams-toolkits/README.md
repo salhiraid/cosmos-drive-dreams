@@ -174,6 +174,17 @@ A detailed explanation of each argument can be found above. Using the panel on t
 python render_from_rds_hq.py -i RDS_HQ_FOLDER -o OUTPUT_FOLDER -cj CLIP_ID -np NOVEL_POSE_FOLDER
 ```
 
+## Fixed Roadside Camera (Highway)
+`create_fixed_camera_highway.py` builds a synthetic highway clip in RDS-HQ format, seen from a static camera on a pole or gantry (e.g. a traffic / radar camera) instead of an ego vehicle. The camera pose is identical for every frame, and vehicles (cars and trucks) drive through on a straight multi-lane highway.
+```bash
+python create_fixed_camera_highway.py -o highway_demo --cam_height 8 --cam_y -16 --yaw 15 --pitch 12 --hfov 60
+python render_from_rds_hq.py -i highway_demo -o highway_demo_render -d highway_fixed -c pinhole --skip lidar --skip world_scenario
+```
+Run `python create_fixed_camera_highway.py --help` for all options (number of lanes, traffic density, truck ratio, clip length, ...). The camera config is `config/dataset_highway_fixed.json`.
+
+> [!NOTE]
+> Cosmos-Transfer1-7B-Sample-AV is trained on ego-vehicle views, so an elevated static viewpoint is outside its training distribution and generation quality may vary.
+
 ## Convert Public Datasets
 
 We provide a conversion and rendering script for the Waymo Open Dataset as an example of how information from another AV source can interface with the model. 
