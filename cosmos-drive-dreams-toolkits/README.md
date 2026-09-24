@@ -190,6 +190,14 @@ python render_from_rds_hq.py -i highway_dense -o highway_dense_render -d highway
 ```
 Run `python create_fixed_camera_highway.py --help` for all options (number of lanes, traffic density, vehicle mix, clip length, ...). The camera config is `config/dataset_highway_fixed.json`.
 
+**Parked car on the shoulder (ego-vehicle view).** `--parked right|left` puts the camera on a stationary car standing on the outer shoulder (default 3.5 m wide), 1.5 m high and looking along the road like an autonomous-driving front camera, while traffic passes. `--facing with_traffic` looks the way the adjacent lanes drive (vehicles overtake and drive away), `--facing against_traffic` looks at their oncoming vehicles. Render with `-c ftheta` to use the same 120° f-theta front camera as the RDS-HQ data:
+```bash
+python create_fixed_camera_highway.py -o highway_parked -c parked_right --parked right --facing against_traffic \
+    --num_lanes 3 --min_gap 8 --max_gap 30
+python render_from_rds_hq.py -i highway_parked -o highway_parked_render -d highway_fixed -c ftheta --skip lidar --skip world_scenario
+```
+The condition videos are then in `highway_parked_render/hdmap/ftheta_roadside_cam/`, so pass `--camera_folder ftheta_roadside_cam` to `generate_video_single_view.py`. `generate_random_highway_scenes.py --camera parked` generates random parked-car scenes.
+
 **Vehicle types.** `--mix` sets the share of each type. Every box size is drawn per dimension within `+-size_variation` (default 20%) of the standard size:
 
 | Subtype | Standard L x W x H (m) | Rendered as |

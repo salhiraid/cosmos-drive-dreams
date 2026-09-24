@@ -15,6 +15,7 @@
 # limitations under the License.
 
 import argparse
+import functools
 import json
 import os
 from tqdm import tqdm
@@ -32,9 +33,46 @@ from cosmos_transfer1.utils.io import read_prompts_from_file, save_video
 from cosmos_transfer1.diffusion.inference.inference_utils import validate_controlnet_specs
 from cosmos_transfer1.diffusion.inference.preprocessors import Preprocessors
 from cosmos_transfer1.diffusion.inference.world_generation_pipeline import DiffusionControl2WorldGenerationPipeline
+from cosmos_transfer1.utils.base_world_generation_pipeline import BaseWorldGenerationPipeline
 
 
 valid_hint_keys = {"hdmap", "lidar"}
+
+
+def place_helper_models_on_gpu(aux_gpu: int):
+    """
+    Keep the diffusion model on the current GPU and run the T5 text encoder and the guardrail models on `aux_gpu`.
+    These helpers use the plain "cuda" device, i.e. the current device, so loading and running them inside
+    torch.cuda.device(aux_gpu) places them there. Text embeddings are moved back to the main GPU afterwards.
+    """
+    main_device = torch.device("cuda", torch.cuda.current_device())
+
+    def on_aux_gpu(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            with torch.cuda.device(aux_gpu):
+                return fn(*args, **kwargs)
+        return wrapper
+
+    for name in [
+        "_load_text_encoder_model",
+        "_load_text_guardrail",
+        "_load_video_guardrail",
+        "_run_guardrail_on_prompt",
+        "_run_guardrail_on_video",
+        "_offload_text_encoder_model",
+        "_offload_guardrail_models",
+    ]:
+        setattr(BaseWorldGenerationPipeline, name, on_aux_gpu(getattr(BaseWorldGenerationPipeline, name)))
+
+    encode_on_aux_gpu = on_aux_gpu(BaseWorldGenerationPipeline._run_text_embedding_on_prompt)
+
+    @functools.wraps(encode_on_aux_gpu)
+    def run_text_embedding_on_prompt(self, prompts, **kwargs):
+        embeddings, masks = encode_on_aux_gpu(self, prompts, **kwargs)
+        return [e.to(main_device) for e in embeddings], [m.to(main_device) for m in masks]
+
+    BaseWorldGenerationPipeline._run_text_embedding_on_prompt = run_text_embedding_on_prompt
 
 def load_controlnet_specs(cfg):
     with open(cfg.controlnet_specs, "r") as f:
@@ -135,6 +173,13 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--fps", type=int, default=24, help="FPS of the output video")
     parser.add_argument("--seed", type=int, default=1, help="Random seed")
     parser.add_argument("--num_gpus", type=int, default=1, help="Number of GPUs used to run inference in parallel.")
+    parser.add_argument(
+        "--helper_gpu",
+        type=int,
+        default=-1,
+        help="Index of a second visible GPU for the T5 text encoder and guardrail models; the diffusion model "
+        "stays on the first visible GPU. -1 keeps everything on one GPU.",
+    )
     parser.add_argument(
         "--offload_diffusion_transformer",
         action="store_true",
@@ -340,6 +385,12 @@ if __name__ == "__main__":
         process_group = parallel_state.get_context_parallel_group()
 
         device_rank = distributed.get_rank(process_group)
+
+    if cfg.helper_gpu >= 0:
+        assert cfg.num_gpus == 1, "--helper_gpu is for single-GPU generation, don't combine it with --num_gpus"
+        assert cfg.helper_gpu < torch.cuda.device_count(), f"--helper_gpu {cfg.helper_gpu} is not a visible GPU"
+        place_helper_models_on_gpu(cfg.helper_gpu)
+        log.info(f"Diffusion model on cuda:{torch.cuda.current_device()}, T5 + guardrails on cuda:{cfg.helper_gpu}")
 
     checkpoint = BASE_7B_CHECKPOINT_AV_SAMPLE_PATH if cfg.is_av_sample else BASE_7B_CHECKPOINT_PATH
 

@@ -22,7 +22,7 @@ from utils.animation_utils import FreePoseAnimator, InterpType
 from pathlib import Path
 
 MINIMAP_TO_TYPE = json.load(open(Path(__file__).parent / 'config' /'hdmap_type_config.json'))
-MINIMAP_TO_RGB = json.load(open(Path(__file__).parent / 'config' /'hdmap_color_config.json'))
+MINIMAP_TO_RGB = json.load(open(Path(__file__).parent / 'config' /'hdmap_color_config.json'))['hdmap']
 DYNAMIC_OBJECT_RGB = [43, 96, 31]
 
 dynamic_sampling_interval = 3
