@@ -209,6 +209,9 @@ def prepare_output(
             crop_y = (resize_h - crop_h) // 2
             full_video = full_video[:, crop_y:crop_y+crop_h, crop_x:crop_x+crop_w]
 
+    if TARGET_CHUNK_FRAME <= 0:  # --chunk_frames 0: the whole clip as one video
+        TARGET_CHUNK_FRAME, OVERLAP_FRAME = len(render_frame_ids), 0
+
     output_root_p = Path(output_root)
     camera_folder_name = f"{camera_type}_{camera_name}"
     (output_root_p / render_name / camera_folder_name).mkdir(parents=True, exist_ok=True)
@@ -586,13 +589,18 @@ def render_sample_rgb(
 @click.option("--skip", "-s", multiple=True, help="can be 'hdmap' or 'lidar' or 'world_scenario'")
 @click.option("--post_training", "-p", type=bool, default=False, help="if True, output the RGB video for post-training")
 @click.option("--novel_pose_folder", "-np", type=str, default=None, help="the folder name of the novel pose data. If provided, we will render the novel ego trajectory")
-def main(input_root, clip_id_json, output_root, dataset, camera_type, skip, post_training, novel_pose_folder):
+@click.option("--chunk_frames", type=int, default=None, help="frames per output video, overriding TARGET_CHUNK_FRAME in the dataset config; 0 = the whole clip as one video (for long generation)")
+def main(input_root, clip_id_json, output_root, dataset, camera_type, skip, post_training, novel_pose_folder, chunk_frames):
     if skip is not None:
         assert all(s in ['hdmap', 'lidar', 'world_scenario'] for s in skip), "skip must be in ['hdmap', 'lidar', 'world_scenario']"
 
     # Load settings
     with open(f'config/dataset_{dataset}.json', 'r') as file:
         settings = json.load(file)
+
+    if chunk_frames is not None:
+        for mode in ('NOT_POST_TRAINING', 'POST_TRAINING'):
+            settings[mode]['TARGET_CHUNK_FRAME'] = chunk_frames
 
     # extract resize_resolution and cosmos_resolution
     cosmos_resolution = settings['COSMOS_RESOLUTION']

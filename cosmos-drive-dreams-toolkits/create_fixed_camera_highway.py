@@ -414,7 +414,8 @@ def create_scene(output_root, clip_id, num_frames=121, num_lanes=3, lane_width=3
         raise click.BadParameter(f"zigzag_types {unknown}: choose from car, pickup, motorcycle")
     if isinstance(mix, str):
         mix = parse_mix(mix)
-    x_min, x_max = cam_x - 300.0, cam_x + 700.0
+    # road from 300 m behind to 700 m ahead of the camera, plus the distance a driving ego car covers
+    x_min, x_max = cam_x - 300.0, cam_x + 700.0 + (ego_speed * num_frames / FPS if ego_lane is not None else 0.0)
 
     # 1. traffic: constant-speed lanes, or the simulation when vehicles change lanes or an ego car is present
     lanelines, road_boundaries, lane_centers = build_road(num_lanes, lane_width, median_width, x_min, x_max, shoulder_width)
