@@ -26,7 +26,7 @@ TRAFFIC_LEVELS = {
     "dense":     {"gap": (5.0, 18.0),  "speed": (13.0, 22.0)},
     "jam":       {"gap": (2.0, 6.0),   "speed": (2.0, 8.0)},
 }
-CAMERA_MOUNTS = ["gantry", "pole", "parked"]
+CAMERA_MOUNTS = ["gantry", "pole", "parked", "ego"]
 
 
 def sample_range(rng, low_high, min_width=0.0):
@@ -44,8 +44,22 @@ def sample_mix(rng, concentration):
     return {name: round(float(w), 4) for name, w in zip(VEHICLE_CLASSES, weights)}
 
 
-def sample_camera(rng, mount, num_lanes, lane_width, median_width, shoulder_width):
+def sample_camera(rng, mount, num_lanes, lane_width, median_width, shoulder_width, min_speed, max_speed):
     half_road = median_width / 2 + num_lanes * lane_width
+    if mount == "ego":
+        # front camera of an ego car in a lane (mostly the middle one), driving with traffic or stopped
+        ego_lane = num_lanes // 2 if rng.random() < 0.6 else int(rng.integers(0, num_lanes))
+        ego_speed = 0.0 if rng.random() < 0.4 else float(rng.uniform(min_speed, max_speed))
+        return {
+            "ego_lane": ego_lane,
+            "ego_speed": round(ego_speed, 2),
+            "cam_x": 0.0,
+            "cam_y": 0.0,
+            "cam_height": round(float(rng.uniform(1.3, 2.2)), 2),
+            "yaw": 0.0,
+            "pitch": round(float(rng.uniform(0.0, 3.0)), 2),
+            "hfov": round(float(rng.uniform(90.0, 120.0)), 2),
+        }
     if mount == "parked":
         # front camera of a car standing on the outer shoulder, like an ego-vehicle view
         side = str(rng.choice(["right", "left"]))
@@ -87,7 +101,7 @@ def sample_camera(rng, mount, num_lanes, lane_width, median_width, shoulder_widt
 
 
 def sample_scene(rng, min_lanes, max_lanes, traffic_levels, camera_mounts, mix_concentration,
-                 min_size_variation, max_size_variation):
+                 min_size_variation, max_size_variation, max_zigzag_ratio, max_lane_change_rate):
     num_lanes = int(rng.integers(min_lanes, max_lanes + 1))
     lane_width = float(rng.uniform(3.3, 3.8))
     median_width = float(rng.uniform(0.6, 5.0))
@@ -114,7 +128,12 @@ def sample_scene(rng, min_lanes, max_lanes, traffic_levels, camera_mounts, mix_c
         "max_speed": round(max_speed, 2),
         "mix": sample_mix(rng, mix_concentration),
         "size_variation": round(float(rng.uniform(min_size_variation, max_size_variation)), 3),
-        **sample_camera(rng, mount, num_lanes, lane_width, median_width, shoulder_width),
+        # lane changes: some clips without, others with zigzagging and / or normal lane changes
+        "zigzag_ratio": round(float(rng.uniform(0.0, max_zigzag_ratio)) if rng.random() < 0.7 else 0.0, 3),
+        "zigzag_period": round(float(rng.uniform(0.9, 2.0)), 2),
+        "zigzag_near": int(rng.integers(0, 4)),
+        "lane_change_rate": round(float(rng.uniform(0.0, max_lane_change_rate)) if rng.random() < 0.7 else 0.0, 2),
+        **sample_camera(rng, mount, num_lanes, lane_width, median_width, shoulder_width, min_speed, max_speed),
         "seed": int(rng.integers(0, 2**31 - 1)),
     }
 
@@ -134,9 +153,13 @@ def sample_scene(rng, min_lanes, max_lanes, traffic_levels, camera_mounts, mix_c
               help="how close each clip's vehicle mix stays to the default (lower = more variety)")
 @click.option("--min_size_variation", type=float, default=0.1, help="min per-clip size variation")
 @click.option("--max_size_variation", type=float, default=0.2, help="max per-clip size variation (0.2 = +-20%)")
+@click.option("--max_zigzag_ratio", type=float, default=0.2,
+              help="max fraction of light vehicles that zigzag between lanes (0 = never)")
+@click.option("--max_lane_change_rate", type=float, default=2.0,
+              help="max normal lane changes per vehicle per minute (0 = never)")
 @click.option("--seed", type=int, default=0, help="master seed; the same seed gives the same batch")
 def main(output_root, num_clips, prefix, num_frames, min_lanes, max_lanes, traffic, camera, mix_concentration,
-         min_size_variation, max_size_variation, seed):
+         min_size_variation, max_size_variation, max_zigzag_ratio, max_lane_change_rate, seed):
     traffic_levels = [t.strip() for t in traffic.split(",")]
     camera_mounts = [c.strip() for c in camera.split(",")]
     for name, valid in [(traffic_levels, TRAFFIC_LEVELS), (camera_mounts, CAMERA_MOUNTS)]:
@@ -152,7 +175,8 @@ def main(output_root, num_clips, prefix, num_frames, min_lanes, max_lanes, traff
     for i in range(num_clips):
         clip_id = f"{prefix}_{i:04d}"
         params = sample_scene(rng, min_lanes, max_lanes, traffic_levels, camera_mounts, mix_concentration,
-                              min_size_variation, max_size_variation)
+                              min_size_variation, max_size_variation,
+                              max_zigzag_ratio, max_lane_change_rate)
         with open(output_root_p / "scene_params" / f"{clip_id}.json", "w") as f:
             json.dump(params, f, indent=2)
 
