@@ -116,11 +116,36 @@ def _allowed_lanes(unit, num_lanes):
     return lanes
 
 
+def _keep_zigzaggers_near(units, near_zigzaggers, count, near_range, ego, view_x, view_dir, view_y, t, rng):
+    """Top up the zigzagging vehicles in front of the camera to `count`."""
+    origin, look = (ego.s, 1.0) if ego is not None else (view_x, view_dir)
+    direction = 1 if (ego is not None or view_y <= 0) else -1  # right-hand traffic: -y carriageway drives +x
+    near_min, near_max = near_range
+
+    def distance(unit):  # from the camera to the closest end of the vehicle, along the viewing direction
+        center = unit.direction * (unit.s - unit.main_length / 2)
+        return (center - origin) * look - unit.main_length / 2
+
+    group = units[direction]
+    in_range = [u for u in near_zigzaggers if near_min <= distance(u) <= near_max]
+    if len(in_range) >= count:
+        return
+    candidates = sorted((distance(u), id(u), u) for u in group
+                        if not (u.is_ego or u.heavy or u.zigzag) and near_min <= distance(u) <= near_max)
+    for _, _, unit in candidates[:count - len(in_range)]:
+        unit.zigzag = True
+        unit.next_change_time = t + rng.uniform(0.0, 0.2)
+        near_zigzaggers.add(unit)
+
+
 def simulate(vehicles, lane_centers, num_frames, warmup_frames, rng, zigzag_ratio=0.0, lane_change_rate=0.0,
-             ego_lane=None, ego_x=0.0, ego_speed=0.0, zigzag_period=1.5, zigzag_near=0, view_x=0.0, view_dir=1.0):
+             ego_lane=None, ego_x=0.0, ego_speed=0.0, zigzag_period=1.5, zigzag_near=0, view_x=0.0, view_dir=1.0,
+             zigzag_near_range=(3.0, 60.0), view_y=0.0):
     """
-    zigzag_near: when the recording starts, the N light vehicles closest in front of the camera (10-150 m along
-    view_dir from view_x, or from the ego car) also start zigzagging, so the weaving is always in view.
+    zigzag_near: during the recording, keep at least N zigzagging light vehicles within zigzag_near_range meters in
+    front of the camera (along view_dir from view_x, or from the ego car's front), on the camera's side of the
+    road (the ego carriageway, or the one closest to view_y). Whenever fewer are in range, the closest normal
+    light vehicle starts zigzagging. They keep their speed instead of hurrying off.
     zigzag_period: seconds per lane change of a zigzagging vehicle, pause included (1.0 = three lane changes in
     three seconds when the gaps allow it). Zigzaggers alternate left / right when they can.
     vehicles: output of spawn_vehicles (positions at the start of the warm-up).
@@ -166,22 +191,12 @@ def simulate(vehicles, lane_centers, num_frames, warmup_frames, rng, zigzag_rati
 
     frames, ego_path = [], []
     num_lanes = {d: len(ys) for d, ys in by_direction.items()}
+    near_zigzaggers = set()
     for step in range(warmup_frames + num_frames):
         t = step * DT
-        if step == warmup_frames and zigzag_near > 0:
-            origin, look = (ego.s, 1.0) if ego is not None else (view_x, view_dir)
-            candidates = []
-            for group in units.values():
-                for unit in group:
-                    if unit.is_ego or unit.heavy or unit.zigzag:
-                        continue
-                    ahead = (unit.direction * (unit.s - unit.main_length / 2) - origin) * look
-                    if 10.0 <= ahead <= 150.0:
-                        candidates.append((ahead, unit))
-            for _, unit in sorted(candidates, key=lambda c: c[0])[:zigzag_near]:
-                unit.zigzag = True
-                unit.desired_speed *= rng.uniform(1.1, 1.3)
-                unit.next_change_time = t + rng.uniform(0.0, 0.3)
+        if step >= warmup_frames and zigzag_near > 0:
+            _keep_zigzaggers_near(units, near_zigzaggers, zigzag_near, zigzag_near_range, ego, view_x, view_dir,
+                                  view_y, t, rng)
         for direction, group in units.items():
             index = LaneIndex(group)
             # 1. lane change decisions

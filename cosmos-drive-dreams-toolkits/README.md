@@ -204,7 +204,7 @@ python create_fixed_camera_highway.py -o highway_ego -c ego_middle --ego_lane mi
     --num_lanes 3 --min_gap 8 --max_gap 25 --zigzag_ratio 0.15 --lane_change_rate 1.0
 python render_from_rds_hq.py -i highway_ego -o highway_ego_render -d highway_fixed -c ftheta --skip lidar --skip world_scenario
 ```
-`--zigzag_period` sets the seconds per lane change of a zigzagging vehicle (`1.0` = three lane changes in three seconds, alternating left and right when the gaps allow), and `--zigzag_near N` makes the N cars / pickups / motorcycles closest in front of the camera zigzag so the weaving is always in view:
+`--zigzag_period` sets the seconds per lane change of a zigzagging vehicle (`1.0` = three lane changes in three seconds, alternating left and right when the gaps allow), and `--zigzag_near N` keeps N cars / pickups / motorcycles zigzagging in front of the camera for the whole clip, on the camera's side of the road (whenever fewer are within `--zigzag_near_min`..`--zigzag_near_max` m, default 3..60, the closest normal car starts weaving). Use `--zigzag_near_max 25` for weaving right in front of the camera:
 ```bash
 python create_fixed_camera_highway.py -o highway_ego -c zigzag --ego_lane middle --ego_speed 22 \
     --num_lanes 3 --min_gap 20 --max_gap 45 --zigzag_near 3 --zigzag_period 1.0

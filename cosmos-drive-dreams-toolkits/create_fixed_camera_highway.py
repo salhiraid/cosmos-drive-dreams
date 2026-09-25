@@ -340,7 +340,11 @@ def hdmap_sample(clip_id, name, polylines, shape="polyline3d"):
 @click.option("--zigzag_period", type=float, default=1.5,
               help="seconds per lane change of a zigzagging vehicle (1.0 = three lane changes in three seconds)")
 @click.option("--zigzag_near", type=int, default=0,
-              help="also make the N cars / pickups / motorcycles closest in front of the camera zigzag")
+              help="keep N cars / pickups / motorcycles zigzagging close in front of the camera, on its side of the road")
+@click.option("--zigzag_near_min", type=float, default=3.0,
+              help="with --zigzag_near: closest distance in front of the camera to pick zigzaggers from (m)")
+@click.option("--zigzag_near_max", type=float, default=60.0,
+              help="with --zigzag_near: farthest distance in front of the camera to pick zigzaggers from (m)")
 @click.option("--lane_change_rate", type=float, default=0.0,
               help="normal lane changes per vehicle per minute (e.g. 1.0); stuck vehicles also overtake")
 @click.option("--cam_x", type=float, default=0.0, help="camera position along the highway (m)")
@@ -388,7 +392,8 @@ def create_scene(output_root, clip_id, num_frames=121, num_lanes=3, lane_width=3
                  shoulder_width=0.5, cam_x=0.0, cam_y=-16.0, cam_height=8.0, yaw=15.0, pitch=12.0, hfov=60.0, width=1280, height=720,
                  min_gap=25.0, max_gap=60.0, min_speed=22.0, max_speed=28.0, mix=DEFAULT_MIX, size_variation=0.2,
                  pole_spacing=40.0, sign_spacing=150.0, ego_lane=None, ego_speed=0.0, zigzag_ratio=0.0,
-                 lane_change_rate=0.0, zigzag_period=1.5, zigzag_near=0, seed=0):
+                 lane_change_rate=0.0, zigzag_period=1.5, zigzag_near=0, zigzag_near_min=3.0, zigzag_near_max=60.0,
+                 seed=0):
     """
     Write one clip in RDS-HQ format. `mix` is a 'name=weight,...' string or a {name: weight} dict.
     With ego_lane (0 = next to the median) the camera rides on an ego car in that lane of the +x carriageway,
@@ -409,7 +414,8 @@ def create_scene(output_root, clip_id, num_frames=121, num_lanes=3, lane_width=3
     if use_simulation:
         sim_frames, ego_path = simulate(vehicles, lane_centers, num_frames, warmup_frames, rng, zigzag_ratio,
                                         lane_change_rate, ego_lane, cam_x, ego_speed, zigzag_period, zigzag_near,
-                                        cam_x, 1.0 if np.cos(np.deg2rad(yaw)) > 0 else -1.0)
+                                        cam_x, 1.0 if np.cos(np.deg2rad(yaw)) > 0 else -1.0,
+                                        (zigzag_near_min, zigzag_near_max), cam_y)
     else:
         sim_frames, ego_path = None, None
 
