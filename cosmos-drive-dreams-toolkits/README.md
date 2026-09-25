@@ -211,6 +211,14 @@ python create_fixed_camera_highway.py -o highway_ego -c zigzag --ego_lane middle
 ```
 `generate_random_highway_scenes.py --camera ego` generates random ego scenes; every mount also gets random `--max_zigzag_ratio` / `--max_lane_change_rate` traffic.
 
+**Longer clips.** Cosmos-Transfer1 generates 121 frames at a time and continues longer condition videos chunk by chunk (each new chunk adds 120 frames, conditioned on the last generated frame), so use `--num_frames 1 + 120 * k` (e.g. `601` = 20 s at 30 fps) and render the whole clip as one condition video with `--chunk_frames 0`:
+```bash
+python create_fixed_camera_highway.py -o highway_long -c zigzag_20s --ego_lane middle --ego_speed 22 \
+    --zigzag_near 3 --zigzag_period 1.0 --num_frames 601
+python render_from_rds_hq.py -i highway_long -o highway_long_render -d highway_fixed -c ftheta \
+    --skip lidar --skip world_scenario --chunk_frames 0
+```
+
 **Keeping the camera static.** Cosmos-Transfer1-7B-Sample-AV was trained on driving footage, so with a fixed camera it may move the camera instead of the vehicles. The scene scripts therefore add static roadside landmarks (light poles every `--pole_spacing` m and road signs every `--sign_spacing` m) and captions that say the camera is static. Pass `--static_camera` to `scripts/generate_video_single_view.py` to put camera motion in the negative prompt, and check the results with `scripts/check_static_camera.py`, which measures how far the background drifts and can move failing videos aside:
 ```bash
 python scripts/check_static_camera.py -i outputs/parked_videos --threshold 8 --move_to outputs/parked_videos_moving
