@@ -105,6 +105,9 @@ def sample_scene(rng, min_lanes, max_lanes, traffic_levels, camera_mounts, mix_c
         "lane_width": round(lane_width, 2),
         "median_width": round(median_width, 2),
         "shoulder_width": round(shoulder_width, 2),
+        # static roadside landmarks help the video model keep the camera still
+        "pole_spacing": round(float(rng.uniform(25.0, 60.0)), 1),
+        "sign_spacing": round(float(rng.uniform(80.0, 250.0)), 1),
         "min_gap": round(min_gap, 2),
         "max_gap": round(max_gap, 2),
         "min_speed": round(min_speed, 2),
