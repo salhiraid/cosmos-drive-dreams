@@ -130,6 +130,8 @@ def sample_scene(rng, min_lanes, max_lanes, traffic_levels, camera_mounts, mix_c
         "size_variation": round(float(rng.uniform(min_size_variation, max_size_variation)), 3),
         # lane changes: some clips without, others with zigzagging and / or normal lane changes
         "zigzag_ratio": round(float(rng.uniform(0.0, max_zigzag_ratio)) if rng.random() < 0.7 else 0.0, 3),
+        "zigzag_period": round(float(rng.uniform(0.9, 2.0)), 2),
+        "zigzag_near": int(rng.integers(0, 4)),
         "lane_change_rate": round(float(rng.uniform(0.0, max_lane_change_rate)) if rng.random() < 0.7 else 0.0, 2),
         **sample_camera(rng, mount, num_lanes, lane_width, median_width, shoulder_width, min_speed, max_speed),
         "seed": int(rng.integers(0, 2**31 - 1)),

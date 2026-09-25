@@ -41,6 +41,7 @@ class Unit:
         self.heavy = bool(main) and main["subtype"] in HEAVY_SUBTYPES
         self.is_ego = main is None
         self.zigzag = False
+        self.last_direction = 0                 # -1 / +1: side of the last lane change, zigzaggers alternate
         self.change = None                      # (from_lane, to_lane, start_time, duration) while changing lanes
         self.next_change_time = 0.0
         self.y = lane_ys[lane] + lateral_offset
@@ -116,8 +117,12 @@ def _allowed_lanes(unit, num_lanes):
 
 
 def simulate(vehicles, lane_centers, num_frames, warmup_frames, rng, zigzag_ratio=0.0, lane_change_rate=0.0,
-             ego_lane=None, ego_x=0.0, ego_speed=0.0):
+             ego_lane=None, ego_x=0.0, ego_speed=0.0, zigzag_period=1.5, zigzag_near=0, view_x=0.0, view_dir=1.0):
     """
+    zigzag_near: when the recording starts, the N light vehicles closest in front of the camera (10-150 m along
+    view_dir from view_x, or from the ego car) also start zigzagging, so the weaving is always in view.
+    zigzag_period: seconds per lane change of a zigzagging vehicle, pause included (1.0 = three lane changes in
+    three seconds when the gaps allow it). Zigzaggers alternate left / right when they can.
     vehicles: output of spawn_vehicles (positions at the start of the warm-up).
     Returns (frames, ego_path):
         frames: list over recorded frames of {track_id: (x, y, yaw, vx, vy)} for every object (trailers included)
@@ -163,6 +168,20 @@ def simulate(vehicles, lane_centers, num_frames, warmup_frames, rng, zigzag_rati
     num_lanes = {d: len(ys) for d, ys in by_direction.items()}
     for step in range(warmup_frames + num_frames):
         t = step * DT
+        if step == warmup_frames and zigzag_near > 0:
+            origin, look = (ego.s, 1.0) if ego is not None else (view_x, view_dir)
+            candidates = []
+            for group in units.values():
+                for unit in group:
+                    if unit.is_ego or unit.heavy or unit.zigzag:
+                        continue
+                    ahead = (unit.direction * (unit.s - unit.main_length / 2) - origin) * look
+                    if 10.0 <= ahead <= 150.0:
+                        candidates.append((ahead, unit))
+            for _, unit in sorted(candidates, key=lambda c: c[0])[:zigzag_near]:
+                unit.zigzag = True
+                unit.desired_speed *= rng.uniform(1.1, 1.3)
+                unit.next_change_time = t + rng.uniform(0.0, 0.3)
         for direction, group in units.items():
             index = LaneIndex(group)
             # 1. lane change decisions
@@ -183,15 +202,22 @@ def simulate(vehicles, lane_centers, num_frames, warmup_frames, rng, zigzag_rati
                 if not want:
                     continue
                 rng.shuffle(targets)
+                if unit.zigzag:  # zig then zag: prefer going back the way the last change came from
+                    targets.sort(key=lambda lane: (lane - unit.lane) == unit.last_direction)
                 for target in targets:
                     if _lane_is_safe(unit, target, index):
-                        duration = rng.uniform(1.2, 2.2) if unit.zigzag else rng.uniform(3.0, 5.0)
+                        if unit.zigzag:
+                            duration = rng.uniform(0.85, 1.0) * zigzag_period
+                            pause = rng.uniform(0.0, 0.15) * zigzag_period
+                        else:
+                            duration, pause = rng.uniform(3.0, 5.0), 5.0
                         unit.change = (unit.lane, target, t, duration)
+                        unit.last_direction = target - unit.lane
                         index.add(unit, target)
-                        unit.next_change_time = t + duration + (rng.uniform(0.3, 1.5) if unit.zigzag else 5.0)
+                        unit.next_change_time = t + duration + pause
                         break
                 else:
-                    unit.next_change_time = t + 0.3  # retry soon
+                    unit.next_change_time = t + (0.1 if unit.zigzag else 0.3)  # retry soon
 
             # 2. longitudinal motion (IDM on the closest leader in any occupied lane)
             accels = []

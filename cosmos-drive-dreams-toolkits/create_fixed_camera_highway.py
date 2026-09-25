@@ -337,6 +337,10 @@ def hdmap_sample(clip_id, name, polylines, shape="polyline3d"):
 @click.option("--ego_speed", type=float, default=0.0, help="with --ego_lane: ego car speed in m/s (0 = stopped in the lane)")
 @click.option("--zigzag_ratio", type=float, default=0.0,
               help="fraction of cars / pickups / motorcycles that weave between lanes (e.g. 0.1)")
+@click.option("--zigzag_period", type=float, default=1.5,
+              help="seconds per lane change of a zigzagging vehicle (1.0 = three lane changes in three seconds)")
+@click.option("--zigzag_near", type=int, default=0,
+              help="also make the N cars / pickups / motorcycles closest in front of the camera zigzag")
 @click.option("--lane_change_rate", type=float, default=0.0,
               help="normal lane changes per vehicle per minute (e.g. 1.0); stuck vehicles also overtake")
 @click.option("--cam_x", type=float, default=0.0, help="camera position along the highway (m)")
@@ -384,7 +388,7 @@ def create_scene(output_root, clip_id, num_frames=121, num_lanes=3, lane_width=3
                  shoulder_width=0.5, cam_x=0.0, cam_y=-16.0, cam_height=8.0, yaw=15.0, pitch=12.0, hfov=60.0, width=1280, height=720,
                  min_gap=25.0, max_gap=60.0, min_speed=22.0, max_speed=28.0, mix=DEFAULT_MIX, size_variation=0.2,
                  pole_spacing=40.0, sign_spacing=150.0, ego_lane=None, ego_speed=0.0, zigzag_ratio=0.0,
-                 lane_change_rate=0.0, seed=0):
+                 lane_change_rate=0.0, zigzag_period=1.5, zigzag_near=0, seed=0):
     """
     Write one clip in RDS-HQ format. `mix` is a 'name=weight,...' string or a {name: weight} dict.
     With ego_lane (0 = next to the median) the camera rides on an ego car in that lane of the +x carriageway,
@@ -398,13 +402,14 @@ def create_scene(output_root, clip_id, num_frames=121, num_lanes=3, lane_width=3
 
     # 1. traffic: constant-speed lanes, or the simulation when vehicles change lanes or an ego car is present
     lanelines, road_boundaries, lane_centers = build_road(num_lanes, lane_width, median_width, x_min, x_max, shoulder_width)
-    use_simulation = ego_lane is not None or zigzag_ratio > 0 or lane_change_rate > 0
+    use_simulation = ego_lane is not None or zigzag_ratio > 0 or lane_change_rate > 0 or zigzag_near > 0
     warmup_frames = 5 * FPS if use_simulation else 0
     vehicles = spawn_vehicles(lane_centers, num_frames + warmup_frames, x_min, x_max, min_gap, max_gap, min_speed,
                               max_speed, mix, size_variation, rng)
     if use_simulation:
         sim_frames, ego_path = simulate(vehicles, lane_centers, num_frames, warmup_frames, rng, zigzag_ratio,
-                                        lane_change_rate, ego_lane, cam_x, ego_speed)
+                                        lane_change_rate, ego_lane, cam_x, ego_speed, zigzag_period, zigzag_near,
+                                        cam_x, 1.0 if np.cos(np.deg2rad(yaw)) > 0 else -1.0)
     else:
         sim_frames, ego_path = None, None
 
@@ -464,7 +469,8 @@ def create_scene(output_root, clip_id, num_frames=121, num_lanes=3, lane_width=3
 
     # 5. text prompts for Cosmos-Transfer (one per weather / time-of-day variation)
     captions = make_captions(num_lanes, cam_y, cam_height, yaw, median_width, lane_width, min_gap, max_gap,
-                             min_speed, max_speed, mix, ego_lane, ego_speed, zigzag_ratio, lane_change_rate)
+                             min_speed, max_speed, mix, ego_lane, ego_speed, max(zigzag_ratio, zigzag_near),
+                             lane_change_rate)
     caption_file = Path(output_root) / "captions" / f"{clip_id}.json"
     caption_file.parent.mkdir(parents=True, exist_ok=True)
     with open(caption_file, "w") as f:

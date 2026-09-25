@@ -204,6 +204,11 @@ python create_fixed_camera_highway.py -o highway_ego -c ego_middle --ego_lane mi
     --num_lanes 3 --min_gap 8 --max_gap 25 --zigzag_ratio 0.15 --lane_change_rate 1.0
 python render_from_rds_hq.py -i highway_ego -o highway_ego_render -d highway_fixed -c ftheta --skip lidar --skip world_scenario
 ```
+`--zigzag_period` sets the seconds per lane change of a zigzagging vehicle (`1.0` = three lane changes in three seconds, alternating left and right when the gaps allow), and `--zigzag_near N` makes the N cars / pickups / motorcycles closest in front of the camera zigzag so the weaving is always in view:
+```bash
+python create_fixed_camera_highway.py -o highway_ego -c zigzag --ego_lane middle --ego_speed 22 \
+    --num_lanes 3 --min_gap 20 --max_gap 45 --zigzag_near 3 --zigzag_period 1.0
+```
 `generate_random_highway_scenes.py --camera ego` generates random ego scenes; every mount also gets random `--max_zigzag_ratio` / `--max_lane_change_rate` traffic.
 
 **Keeping the camera static.** Cosmos-Transfer1-7B-Sample-AV was trained on driving footage, so with a fixed camera it may move the camera instead of the vehicles. The scene scripts therefore add static roadside landmarks (light poles every `--pole_spacing` m and road signs every `--sign_spacing` m) and captions that say the camera is static. Pass `--static_camera` to `scripts/generate_video_single_view.py` to put camera motion in the negative prompt, and check the results with `scripts/check_static_camera.py`, which measures how far the background drifts and can move failing videos aside:
