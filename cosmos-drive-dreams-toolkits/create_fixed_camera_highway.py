@@ -224,7 +224,8 @@ def lane_name(lane, num_lanes):
 
 
 def make_captions(num_lanes, cam_y, cam_height, yaw, median_width, lane_width, min_gap, max_gap, min_speed,
-                  max_speed, mix, ego_lane=None, ego_speed=0.0, zigzag_ratio=0.0, lane_change_rate=0.0):
+                  max_speed, mix, ego_lane=None, ego_speed=0.0, zigzag_ratio=0.0, lane_change_rate=0.0,
+                  zigzag_types=("car",)):
     """Text prompts for Cosmos-Transfer, one per weather / time-of-day variation, describing the camera view."""
     half_road = median_width / 2 + num_lanes * lane_width
     looks_along_x = np.cos(np.deg2rad(yaw)) > 0
@@ -272,7 +273,9 @@ def make_captions(num_lanes, cam_y, cam_height, yaw, median_width, lane_width, m
             f"median barrier, painted lane markings, street light poles and road signs along the roadside, "
             f"with {traffic}. The traffic includes {vehicles}.")
     if zigzag_ratio > 0:
-        base += (" Some cars and motorcycles drive aggressively, zigzagging between the lanes and cutting in and out "
+        who = [VEHICLE_WORDS[name] for name in zigzag_types if name in VEHICLE_WORDS]
+        who = " and ".join([", ".join(who[:-1]), who[-1]] if len(who) > 1 else who) or "cars"
+        base += (f" Some {who} drive aggressively, zigzagging between the lanes and cutting in and out "
                  "of gaps in the traffic.")
     if lane_change_rate > 0:
         base += " Other vehicles change lanes from time to time, signalling and merging smoothly."
@@ -336,11 +339,13 @@ def hdmap_sample(clip_id, name, polylines, shape="polyline3d"):
                    "(0 = next to the median); ego-car view like the RDS-HQ front camera")
 @click.option("--ego_speed", type=float, default=0.0, help="with --ego_lane: ego car speed in m/s (0 = stopped in the lane)")
 @click.option("--zigzag_ratio", type=float, default=0.0,
-              help="fraction of cars / pickups / motorcycles that weave between lanes (e.g. 0.1)")
+              help="fraction of the --zigzag_types vehicles that weave between lanes (e.g. 0.1)")
 @click.option("--zigzag_period", type=float, default=1.5,
               help="seconds per lane change of a zigzagging vehicle (1.0 = three lane changes in three seconds)")
 @click.option("--zigzag_near", type=int, default=0,
-              help="keep N cars / pickups / motorcycles zigzagging close in front of the camera, on its side of the road")
+              help="keep N --zigzag_types vehicles zigzagging close in front of the camera, on its side of the road")
+@click.option("--zigzag_types", type=str, default="car",
+              help="comma-separated vehicle types that zigzag: car, pickup, motorcycle (default: car only)")
 @click.option("--zigzag_near_min", type=float, default=3.0,
               help="with --zigzag_near: closest distance in front of the camera to pick zigzaggers from (m)")
 @click.option("--zigzag_near_max", type=float, default=60.0,
@@ -393,6 +398,7 @@ def create_scene(output_root, clip_id, num_frames=121, num_lanes=3, lane_width=3
                  min_gap=25.0, max_gap=60.0, min_speed=22.0, max_speed=28.0, mix=DEFAULT_MIX, size_variation=0.2,
                  pole_spacing=40.0, sign_spacing=150.0, ego_lane=None, ego_speed=0.0, zigzag_ratio=0.0,
                  lane_change_rate=0.0, zigzag_period=1.5, zigzag_near=0, zigzag_near_min=3.0, zigzag_near_max=60.0,
+                 zigzag_types="car",
                  seed=0):
     """
     Write one clip in RDS-HQ format. `mix` is a 'name=weight,...' string or a {name: weight} dict.
@@ -401,6 +407,11 @@ def create_scene(output_root, clip_id, num_frames=121, num_lanes=3, lane_width=3
     zigzag_ratio / lane_change_rate turn on the traffic simulation with lane changes.
     """
     rng = np.random.default_rng(seed)
+    if isinstance(zigzag_types, str):
+        zigzag_types = tuple(t.strip() for t in zigzag_types.split(",") if t.strip())
+    unknown = [t for t in zigzag_types if t not in VEHICLE_CLASSES or VEHICLE_CLASSES[t]["heavy"]]
+    if unknown:
+        raise click.BadParameter(f"zigzag_types {unknown}: choose from car, pickup, motorcycle")
     if isinstance(mix, str):
         mix = parse_mix(mix)
     x_min, x_max = cam_x - 300.0, cam_x + 700.0
@@ -411,11 +422,17 @@ def create_scene(output_root, clip_id, num_frames=121, num_lanes=3, lane_width=3
     warmup_frames = 5 * FPS if use_simulation else 0
     vehicles = spawn_vehicles(lane_centers, num_frames + warmup_frames, x_min, x_max, min_gap, max_gap, min_speed,
                               max_speed, mix, size_variation, rng)
+    def new_zigzag_vehicle():
+        """A fresh vehicle of one of the zigzag types, for when too few are near the camera."""
+        subtype = str(rng.choice(zigzag_types))
+        return {"type": VEHICLE_CLASSES[subtype]["object_type"], "subtype": subtype,
+                "lwh": random_size(VEHICLE_CLASSES[subtype]["lwh"], size_variation, rng)}
+
     if use_simulation:
         sim_frames, ego_path = simulate(vehicles, lane_centers, num_frames, warmup_frames, rng, zigzag_ratio,
                                         lane_change_rate, ego_lane, cam_x, ego_speed, zigzag_period, zigzag_near,
                                         cam_x, 1.0 if np.cos(np.deg2rad(yaw)) > 0 else -1.0,
-                                        (zigzag_near_min, zigzag_near_max), cam_y)
+                                        (zigzag_near_min, zigzag_near_max), cam_y, zigzag_types, new_zigzag_vehicle)
     else:
         sim_frames, ego_path = None, None
 
@@ -476,7 +493,7 @@ def create_scene(output_root, clip_id, num_frames=121, num_lanes=3, lane_width=3
     # 5. text prompts for Cosmos-Transfer (one per weather / time-of-day variation)
     captions = make_captions(num_lanes, cam_y, cam_height, yaw, median_width, lane_width, min_gap, max_gap,
                              min_speed, max_speed, mix, ego_lane, ego_speed, max(zigzag_ratio, zigzag_near),
-                             lane_change_rate)
+                             lane_change_rate, zigzag_types)
     caption_file = Path(output_root) / "captions" / f"{clip_id}.json"
     caption_file.parent.mkdir(parents=True, exist_ok=True)
     with open(caption_file, "w") as f:

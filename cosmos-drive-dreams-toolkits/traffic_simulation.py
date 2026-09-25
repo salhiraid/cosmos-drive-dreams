@@ -116,8 +116,12 @@ def _allowed_lanes(unit, num_lanes):
     return lanes
 
 
-def _keep_zigzaggers_near(units, near_zigzaggers, count, near_range, ego, view_x, view_dir, view_y, t, rng):
-    """Top up the zigzagging vehicles in front of the camera to `count`."""
+def _keep_zigzaggers_near(units, near_zigzaggers, count, near_range, ego, view_x, view_dir, view_y, t, rng,
+                          zigzag_types, new_vehicle=None, vehicles=None, lane_ys=None):
+    """
+    Top up the zigzagging vehicles in front of the camera to `count`. With new_vehicle (only at the first recorded
+    frame, so nothing pops into view later), missing zigzaggers are added as new vehicles in free gaps in range.
+    """
     origin, look = (ego.s, 1.0) if ego is not None else (view_x, view_dir)
     direction = 1 if (ego is not None or view_y <= 0) else -1  # right-hand traffic: -y carriageway drives +x
     near_min, near_max = near_range
@@ -131,21 +135,60 @@ def _keep_zigzaggers_near(units, near_zigzaggers, count, near_range, ego, view_x
     if len(in_range) >= count:
         return
     candidates = sorted((distance(u), id(u), u) for u in group
-                        if not (u.is_ego or u.heavy or u.zigzag) and near_min <= distance(u) <= near_max)
+                        if not (u.is_ego or u.zigzag) and u.main["subtype"] in zigzag_types
+                        and near_min <= distance(u) <= near_max)
     for _, _, unit in candidates[:count - len(in_range)]:
         unit.zigzag = True
         unit.next_change_time = t + rng.uniform(0.0, 0.2)
         near_zigzaggers.add(unit)
 
+    missing = count - len(in_range) - len(candidates[:count - len(in_range)])
+    for _ in range(missing if new_vehicle is not None else 0):
+        template = new_vehicle()
+        length = template["lwh"][0]
+        index = LaneIndex(group)
+        placed = False
+        # try the closest free spot first, in any lane of the camera's carriageway
+        for d in np.arange(near_min, near_max, 1.0):
+            center_x = origin + look * (d + length / 2)
+            front = direction * center_x + length / 2
+            for lane in rng.permutation(len(lane_ys)):
+                probe = Unit(dict(template, x0=center_x, velocity=0.0, y=lane_ys[lane], track_id=""), None,
+                             direction, int(lane), 0.0, lane_ys)
+                probe.s = front
+                ahead, behind = index.neighbours(probe, int(lane))
+                speed = behind.v if behind is not None else (ahead.v if ahead is not None else 25.0)
+                if ahead is not None and ahead.rear - front < max(6.0, 0.5 * speed):
+                    continue
+                if behind is not None and front - length - behind.s < max(6.0, 0.6 * behind.v):
+                    continue
+                track_id = f"{len(vehicles):05d}"
+                vehicle = dict(template, track_id=track_id, x0=center_x, y=float(lane_ys[lane]),
+                               velocity=direction * speed, yaw=0.0 if direction > 0 else np.pi)
+                vehicles.append(vehicle)
+                unit = Unit(vehicle, None, direction, int(lane), 0.0, lane_ys)
+                unit.s, unit.v, unit.desired_speed = front, speed, speed
+                unit.zigzag, unit.next_change_time = True, t + rng.uniform(0.0, 0.5)
+                group.append(unit)
+                near_zigzaggers.add(unit)
+                placed = True
+                break
+            if placed:
+                break
+
 
 def simulate(vehicles, lane_centers, num_frames, warmup_frames, rng, zigzag_ratio=0.0, lane_change_rate=0.0,
              ego_lane=None, ego_x=0.0, ego_speed=0.0, zigzag_period=1.5, zigzag_near=0, view_x=0.0, view_dir=1.0,
-             zigzag_near_range=(3.0, 60.0), view_y=0.0):
+             zigzag_near_range=(3.0, 60.0), view_y=0.0, zigzag_types=("car",), new_zigzag_vehicle=None):
     """
     zigzag_near: during the recording, keep at least N zigzagging light vehicles within zigzag_near_range meters in
     front of the camera (along view_dir from view_x, or from the ego car's front), on the camera's side of the
     road (the ego carriageway, or the one closest to view_y). Whenever fewer are in range, the closest normal
     light vehicle starts zigzagging. They keep their speed instead of hurrying off.
+    new_zigzag_vehicle: optional callable returning a vehicle dict (type, subtype, lwh); when there are not enough
+    zigzag_types vehicles in range at the first recorded frame, new ones are added in free gaps (appended to
+    `vehicles`).
+    zigzag_types: vehicle subtypes that may zigzag (e.g. ("car", "pickup")); heavy vehicles never do.
     zigzag_period: seconds per lane change of a zigzagging vehicle, pause included (1.0 = three lane changes in
     three seconds when the gaps allow it). Zigzaggers alternate left / right when they can.
     vehicles: output of spawn_vehicles (positions at the start of the warm-up).
@@ -159,6 +202,7 @@ def simulate(vehicles, lane_centers, num_frames, warmup_frames, rng, zigzag_rati
     for direction in by_direction:  # index 0 = next to the median (smallest |y|)
         by_direction[direction].sort(key=abs)
 
+    zigzag_types = tuple(t for t in zigzag_types if t not in HEAVY_SUBTYPES)
     trailers = {v["towed_by"]: v for v in vehicles if "towed_by" in v}
     units = {1: [], -1: []}
     for v in vehicles:
@@ -171,7 +215,7 @@ def simulate(vehicles, lane_centers, num_frames, warmup_frames, rng, zigzag_rati
         if trailer is not None:
             trailer = dict(trailer, hitch=abs(v["x0"] - trailer["x0"]) - (v["lwh"][0] + trailer["lwh"][0]) / 2)
         unit = Unit(v, trailer, direction, lane, v["y"] - lane_ys[lane], lane_ys)
-        can_zigzag = not unit.heavy
+        can_zigzag = v["subtype"] in zigzag_types
         unit.zigzag = can_zigzag and rng.random() < zigzag_ratio
         if unit.zigzag:
             unit.desired_speed *= rng.uniform(1.1, 1.3)  # weaving drivers are in a hurry
@@ -195,8 +239,11 @@ def simulate(vehicles, lane_centers, num_frames, warmup_frames, rng, zigzag_rati
     for step in range(warmup_frames + num_frames):
         t = step * DT
         if step >= warmup_frames and zigzag_near > 0:
+            near_direction = 1 if (ego is not None or view_y <= 0) else -1
             _keep_zigzaggers_near(units, near_zigzaggers, zigzag_near, zigzag_near_range, ego, view_x, view_dir,
-                                  view_y, t, rng)
+                                  view_y, t, rng, zigzag_types,
+                                  new_zigzag_vehicle if step == warmup_frames else None, vehicles,
+                                  by_direction[near_direction])
         for direction, group in units.items():
             index = LaneIndex(group)
             # 1. lane change decisions
