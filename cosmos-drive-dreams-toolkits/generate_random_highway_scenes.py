@@ -17,7 +17,8 @@ from pathlib import Path
 import click
 import numpy as np
 
-from create_fixed_camera_highway import DEFAULT_MIX, VEHICLE_CLASSES, create_scene, parked_camera, parse_mix
+from create_fixed_camera_highway import CAMERA_NAME, DEFAULT_MIX, FPS, VEHICLE_CLASSES, create_scene, parked_camera, parse_mix
+from utils.wds_utils import get_sample
 
 # traffic regimes: bumper-to-bumper gap range (m) and lane speed range (m/s)
 TRAFFIC_LEVELS = {
@@ -151,6 +152,46 @@ def zigzag_scene_params(rng, max_lanes_per_move, num_lanes):
     }
 
 
+def zigzag_rate(output_root, clip_id, near_max, lane_width):
+    """
+    Lane-change moves per second that start 0..near_max m in front of the camera, on the camera's side of the road.
+    A move is a stretch of sideways motion covering at least most of a lane width.
+    """
+    objects = get_sample(Path(output_root) / "all_object_info" / f"{clip_id}.tar")
+    poses = get_sample(Path(output_root) / "pose" / f"{clip_id}.tar")
+    frame_keys = sorted(k for k in objects if k.endswith(".all_object_info.json"))
+    tracks = {}
+    for key in frame_keys:
+        frame = key.split(".")[0]
+        pose = poses[f"{frame}.pose.{CAMERA_NAME}.npy"]
+        look = np.sign(pose[0, 2]) or 1.0
+        side = np.sign(pose[1, 3]) or -1.0
+        for track_id, obj in objects[key].items():
+            to_world = np.array(obj["object_to_world"])
+            if np.sign(to_world[1, 3]) != side:
+                continue
+            distance = (to_world[0, 3] - pose[0, 3]) * look - obj["object_lwh"][0] / 2
+            tracks.setdefault(track_id, []).append((to_world[1, 3], abs(obj["object_velocity"][1]) > 0.3, distance))
+    moves = 0
+    for points in tracks.values():
+        start = None
+        for y, moving, distance in points + [(None, False, None)]:
+            if moving and start is None:
+                start = (y, distance)
+            elif not moving and start is not None:
+                if abs(last_y - start[0]) >= 0.8 * lane_width and 0.0 <= start[1] <= near_max:
+                    moves += 1
+                start = None
+            if moving:
+                last_y = y
+    return moves / (len(frame_keys) / FPS)
+
+
+def remove_clip(output_root, clip_id):
+    for path in Path(output_root).glob(f"*/{clip_id}.*"):
+        path.unlink()
+
+
 @click.command()
 @click.option("--output_root", "-o", type=str, required=True, help="output folder in RDS-HQ format")
 @click.option("--num_clips", "-n", type=int, default=10, help="number of random clips to generate")
@@ -174,10 +215,14 @@ def zigzag_scene_params(rng, max_lanes_per_move, num_lanes):
               help="every clip has several cars zigzagging close in front of the camera (0.6-1.0 s per lane change)")
 @click.option("--zigzag_lanes", type=int, default=2,
               help="with --zigzag_focus: most lanes a zigzag move may cross (random 1..N per clip)")
+@click.option("--min_zigzag_rate", type=float, default=0.0,
+              help="keep only clips with at least this many lane changes per second starting within "
+                   "--zigzag_near_max m in front of the camera; weaker clips are replaced by new random ones "
+                   "until -n clips pass (e.g. 1.0 with --zigzag_focus)")
 @click.option("--seed", type=int, default=0, help="master seed; the same seed gives the same batch")
 def main(output_root, num_clips, prefix, num_frames, min_lanes, max_lanes, traffic, camera, mix_concentration,
          min_size_variation, max_size_variation, max_zigzag_ratio, max_lane_change_rate, zigzag_focus, zigzag_lanes,
-         seed):
+         min_zigzag_rate, seed):
     traffic_levels = [t.strip() for t in traffic.split(",")]
     camera_mounts = [c.strip() for c in camera.split(",")]
     for name, valid in [(traffic_levels, TRAFFIC_LEVELS), (camera_mounts, CAMERA_MOUNTS)]:
@@ -189,9 +234,13 @@ def main(output_root, num_clips, prefix, num_frames, min_lanes, max_lanes, traff
     output_root_p = Path(output_root)
     (output_root_p / "scene_params").mkdir(parents=True, exist_ok=True)
 
-    clip_ids = []
-    for i in range(num_clips):
-        clip_id = f"{prefix}_{i:04d}"
+    clip_ids, attempts, max_attempts = [], 0, num_clips * 10
+    while len(clip_ids) < num_clips:
+        if attempts >= max_attempts:
+            raise click.ClickException(f"only {len(clip_ids)} of {num_clips} clips reached --min_zigzag_rate "
+                                       f"{min_zigzag_rate} after {attempts} attempts; lower it or use --zigzag_focus")
+        attempts += 1
+        clip_id = f"{prefix}_{len(clip_ids):04d}"
         params = sample_scene(rng, min_lanes, max_lanes, traffic_levels, camera_mounts, mix_concentration,
                               min_size_variation, max_size_variation,
                               max_zigzag_ratio, max_lane_change_rate)
@@ -200,14 +249,24 @@ def main(output_root, num_clips, prefix, num_frames, min_lanes, max_lanes, traff
             if params["camera_mount"] == "ego" and rng.random() < 0.85:
                 # weaving stays in view longest when the ego car drives with the traffic
                 params["ego_speed"] = round(float(rng.uniform(params["min_speed"], params["max_speed"])), 2)
-        with open(output_root_p / "scene_params" / f"{clip_id}.json", "w") as f:
-            json.dump(params, f, indent=2)
 
         scene_args = {k: v for k, v in params.items() if k not in ("traffic_level", "camera_mount")}
         create_scene(output_root, clip_id, num_frames=num_frames, **scene_args)
+
+        rate = zigzag_rate(output_root, clip_id, params.get("zigzag_near_max", 60.0), params["lane_width"])
+        params["zigzag_rate"] = round(rate, 2)
+        if rate < min_zigzag_rate:
+            print(f"  attempt {attempts}: {rate:.1f} lane changes/s in front of the camera < {min_zigzag_rate}, "
+                  f"replacing it")
+            remove_clip(output_root, clip_id)
+            continue
+
+        with open(output_root_p / "scene_params" / f"{clip_id}.json", "w") as f:
+            json.dump(params, f, indent=2)
         clip_ids.append(clip_id)
-        print(f"[{i + 1}/{num_clips}] {clip_id}: {params['num_lanes'] * 2} lanes, {params['traffic_level']} traffic, "
-              f"{params['camera_mount']} camera")
+        print(f"[{len(clip_ids)}/{num_clips}] {clip_id}: {params['num_lanes'] * 2} lanes, "
+              f"{params['traffic_level']} traffic, {params['camera_mount']} camera, "
+              f"{rate:.1f} lane changes/s in front")
 
     with open(output_root_p / "clip_ids.json", "w") as f:
         json.dump(clip_ids, f, indent=2)
