@@ -346,6 +346,8 @@ def hdmap_sample(clip_id, name, polylines, shape="polyline3d"):
               help="keep N --zigzag_types vehicles zigzagging close in front of the camera, on its side of the road")
 @click.option("--zigzag_types", type=str, default="car",
               help="comma-separated vehicle types that zigzag: car, pickup, motorcycle (default: car only)")
+@click.option("--zigzag_lanes", type=int, default=1,
+              help="most lanes a zigzagging vehicle crosses in one move (2 = can jump two lanes at once)")
 @click.option("--zigzag_near_min", type=float, default=3.0,
               help="with --zigzag_near: closest distance in front of the camera to pick zigzaggers from (m)")
 @click.option("--zigzag_near_max", type=float, default=60.0,
@@ -398,7 +400,7 @@ def create_scene(output_root, clip_id, num_frames=121, num_lanes=3, lane_width=3
                  min_gap=25.0, max_gap=60.0, min_speed=22.0, max_speed=28.0, mix=DEFAULT_MIX, size_variation=0.2,
                  pole_spacing=40.0, sign_spacing=150.0, ego_lane=None, ego_speed=0.0, zigzag_ratio=0.0,
                  lane_change_rate=0.0, zigzag_period=1.5, zigzag_near=0, zigzag_near_min=3.0, zigzag_near_max=60.0,
-                 zigzag_types="car",
+                 zigzag_types="car", zigzag_lanes=1,
                  seed=0):
     """
     Write one clip in RDS-HQ format. `mix` is a 'name=weight,...' string or a {name: weight} dict.
@@ -433,7 +435,8 @@ def create_scene(output_root, clip_id, num_frames=121, num_lanes=3, lane_width=3
         sim_frames, ego_path = simulate(vehicles, lane_centers, num_frames, warmup_frames, rng, zigzag_ratio,
                                         lane_change_rate, ego_lane, cam_x, ego_speed, zigzag_period, zigzag_near,
                                         cam_x, 1.0 if np.cos(np.deg2rad(yaw)) > 0 else -1.0,
-                                        (zigzag_near_min, zigzag_near_max), cam_y, zigzag_types, new_zigzag_vehicle)
+                                        (zigzag_near_min, zigzag_near_max), cam_y, zigzag_types, new_zigzag_vehicle,
+                                        zigzag_lanes)
     else:
         sim_frames, ego_path = None, None
 

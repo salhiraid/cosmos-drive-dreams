@@ -138,6 +138,19 @@ def sample_scene(rng, min_lanes, max_lanes, traffic_levels, camera_mounts, mix_c
     }
 
 
+def zigzag_scene_params(rng, max_lanes_per_move, num_lanes):
+    """Overrides for --zigzag_focus: several cars weave in front of the camera, about once per second or faster."""
+    return {
+        "zigzag_near": int(rng.integers(4, 8)),                      # 4-7 weaving cars in front of the camera
+        "zigzag_near_max": round(float(rng.uniform(30.0, 50.0)), 1),
+        "zigzag_period": round(float(rng.uniform(0.6, 1.0)), 2),     # 1-1.7 lane changes per second
+        "zigzag_lanes": int(rng.integers(1, min(max_lanes_per_move, num_lanes - 1) + 1)) if num_lanes > 1 else 1,
+        "zigzag_ratio": round(float(rng.uniform(0.05, 0.15)), 3),    # a few more weavers further away
+        "zigzag_types": "car",
+        "lane_change_rate": round(float(rng.uniform(0.0, 1.0)), 2),
+    }
+
+
 @click.command()
 @click.option("--output_root", "-o", type=str, required=True, help="output folder in RDS-HQ format")
 @click.option("--num_clips", "-n", type=int, default=10, help="number of random clips to generate")
@@ -157,9 +170,14 @@ def sample_scene(rng, min_lanes, max_lanes, traffic_levels, camera_mounts, mix_c
               help="max fraction of light vehicles that zigzag between lanes (0 = never)")
 @click.option("--max_lane_change_rate", type=float, default=2.0,
               help="max normal lane changes per vehicle per minute (0 = never)")
+@click.option("--zigzag_focus", is_flag=True,
+              help="every clip has several cars zigzagging close in front of the camera (0.6-1.0 s per lane change)")
+@click.option("--zigzag_lanes", type=int, default=2,
+              help="with --zigzag_focus: most lanes a zigzag move may cross (random 1..N per clip)")
 @click.option("--seed", type=int, default=0, help="master seed; the same seed gives the same batch")
 def main(output_root, num_clips, prefix, num_frames, min_lanes, max_lanes, traffic, camera, mix_concentration,
-         min_size_variation, max_size_variation, max_zigzag_ratio, max_lane_change_rate, seed):
+         min_size_variation, max_size_variation, max_zigzag_ratio, max_lane_change_rate, zigzag_focus, zigzag_lanes,
+         seed):
     traffic_levels = [t.strip() for t in traffic.split(",")]
     camera_mounts = [c.strip() for c in camera.split(",")]
     for name, valid in [(traffic_levels, TRAFFIC_LEVELS), (camera_mounts, CAMERA_MOUNTS)]:
@@ -177,6 +195,11 @@ def main(output_root, num_clips, prefix, num_frames, min_lanes, max_lanes, traff
         params = sample_scene(rng, min_lanes, max_lanes, traffic_levels, camera_mounts, mix_concentration,
                               min_size_variation, max_size_variation,
                               max_zigzag_ratio, max_lane_change_rate)
+        if zigzag_focus:
+            params.update(zigzag_scene_params(rng, zigzag_lanes, params["num_lanes"]))
+            if params["camera_mount"] == "ego" and rng.random() < 0.85:
+                # weaving stays in view longest when the ego car drives with the traffic
+                params["ego_speed"] = round(float(rng.uniform(params["min_speed"], params["max_speed"])), 2)
         with open(output_root_p / "scene_params" / f"{clip_id}.json", "w") as f:
             json.dump(params, f, indent=2)
 
