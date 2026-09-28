@@ -141,8 +141,8 @@ def sample_scene(rng, min_lanes, max_lanes, traffic_levels, camera_mounts, mix_c
 def zigzag_scene_params(rng, max_lanes_per_move, num_lanes):
     """Overrides for --zigzag_focus: several cars weave in front of the camera, about once per second or faster."""
     return {
-        "zigzag_near": int(rng.integers(3, 6)),                      # 3-5 weaving cars in front of the camera
-        "zigzag_near_max": round(float(rng.uniform(25.0, 45.0)), 1),
+        "zigzag_near": int(rng.integers(4, 8)),                      # 4-7 weaving cars in front of the camera
+        "zigzag_near_max": round(float(rng.uniform(30.0, 50.0)), 1),
         "zigzag_period": round(float(rng.uniform(0.6, 1.0)), 2),     # 1-1.7 lane changes per second
         "zigzag_lanes": int(rng.integers(1, min(max_lanes_per_move, num_lanes - 1) + 1)) if num_lanes > 1 else 1,
         "zigzag_ratio": round(float(rng.uniform(0.05, 0.15)), 3),    # a few more weavers further away
@@ -197,6 +197,9 @@ def main(output_root, num_clips, prefix, num_frames, min_lanes, max_lanes, traff
                               max_zigzag_ratio, max_lane_change_rate)
         if zigzag_focus:
             params.update(zigzag_scene_params(rng, zigzag_lanes, params["num_lanes"]))
+            if params["camera_mount"] == "ego" and rng.random() < 0.85:
+                # weaving stays in view longest when the ego car drives with the traffic
+                params["ego_speed"] = round(float(rng.uniform(params["min_speed"], params["max_speed"])), 2)
         with open(output_root_p / "scene_params" / f"{clip_id}.json", "w") as f:
             json.dump(params, f, indent=2)
 

@@ -22,6 +22,8 @@ MAX_ACCEL = {"light": 1.8, "heavy": 1.0}
 
 HEAVY_SUBTYPES = {"truck", "semi_truck", "car_trailer"}
 EGO_LENGTH, EGO_WIDTH = 4.7, 1.9
+MAX_LANE_CHANGE_HEADING = np.deg2rad(25.0)  # steepest heading during a lane change
+APPROACH_DISTANCE = 60.0  # --zigzag_near also picks vehicles this far outside the range that are driving into it
 
 
 class Unit:
@@ -43,6 +45,7 @@ class Unit:
         self.zigzag = False
         self.last_direction = 0                 # -1 / +1: side of the last lane change, zigzaggers alternate
         self.change = None                      # (from_lane, to_lane, start_time, duration) while changing lanes
+        self.change_progress = 0.0              # 0..1 through the current lane change
         self.next_change_time = 0.0
         self.y = lane_ys[lane] + lateral_offset
         self.vy = 0.0
@@ -134,19 +137,41 @@ def _keep_zigzaggers_near(units, near_zigzaggers, count, near_range, ego, view_x
         center = unit.direction * (unit.s - unit.main_length / 2)
         return (center - origin) * look - unit.main_length / 2
 
+    camera_speed = ego.v if ego is not None else 0.0
+
+    def time_to_view(unit):
+        """0 in the range, otherwise seconds until the vehicle drives into it (None if it never will)."""
+        d = distance(unit)
+        if near_min <= d <= near_max:
+            return 0.0
+        closing = unit.direction * unit.v * look - camera_speed  # >0: moves further ahead of the camera
+        gap = near_min - d if d < near_min else near_max - d
+        if gap * closing <= 0 or abs(d - np.clip(d, near_min, near_max)) > APPROACH_DISTANCE:
+            return None
+        return gap / closing
+
     group = units[direction]
-    in_range = [u for u in near_zigzaggers if near_min <= distance(u) <= near_max]
-    if len(in_range) >= count:
-        return
-    candidates = sorted((distance(u), id(u), u) for u in group
-                        if not (u.is_ego or u.zigzag) and u.main["subtype"] in zigzag_types
-                        and near_min <= distance(u) <= near_max)
-    for _, _, unit in candidates[:count - len(in_range)]:
+    etas = {id(u): time_to_view(u) for u in group}
+    candidates = [(etas[id(u)], distance(u), id(u), u) for u in group
+                  if not (u.is_ego or u.zigzag) and u.main["subtype"] in zigzag_types and etas[id(u)] is not None
+                  and u.v >= 2.0]
+    candidates.sort(key=lambda c: c[:3])
+
+    # 1. keep `count` weavers inside the range, picking the closest vehicles already in it
+    in_range = [u for u in near_zigzaggers if etas.get(id(u)) == 0.0 and u.v >= 2.0]
+    in_view_candidates = [c for c in candidates if c[0] == 0.0][:max(0, count - len(in_range))]
+    # 2. and up to `count` more on their way into the range, so the next weavers arrive already weaving
+    arriving = [u for u in near_zigzaggers if etas.get(id(u)) not in (None, 0.0)]
+    arriving_candidates = [c for c in candidates if c[0] > 0.0][:max(0, count - len(arriving))]
+    for _, _, _, unit in in_view_candidates + arriving_candidates:
         unit.zigzag = True
         unit.next_change_time = t + rng.uniform(0.0, 0.2)
         near_zigzaggers.add(unit)
+    for _, _, _, unit in in_view_candidates:
+        if camera_speed > 1.0:  # stay in front of a driving ego car instead of drifting out of view
+            unit.desired_speed = camera_speed * rng.uniform(0.97, 1.08)
 
-    missing = count - len(in_range) - len(candidates[:count - len(in_range)])
+    missing = count - len(in_range) - len(in_view_candidates)
     for _ in range(missing if new_vehicle is not None else 0):
         template = new_vehicle()
         length = template["lwh"][0]
@@ -161,7 +186,13 @@ def _keep_zigzaggers_near(units, near_zigzaggers, count, near_range, ego, view_x
                              direction, int(lane), 0.0, lane_ys)
                 probe.s = front
                 ahead, behind = index.neighbours(probe, int(lane))
-                speed = behind.v if behind is not None else (ahead.v if ahead is not None else 25.0)
+                # drive at the lane's normal speed (not the speed of a queue behind, e.g. behind a stopped ego car),
+                # slowed only by the vehicle ahead; skip spots where the new car would have to crawl
+                free_speeds = [u.desired_speed for u in group if not u.is_ego and u.lane == lane and u.desired_speed > 1]
+                lane_speed = float(np.median(free_speeds)) if free_speeds else 25.0
+                speed = min(lane_speed, ahead.v) if ahead is not None else lane_speed
+                if speed < 5.0:
+                    continue
                 if ahead is not None and ahead.rear - front < max(6.0, 0.5 * speed):
                     continue
                 if behind is not None and front - length - behind.s < max(6.0, 0.6 * behind.v):
@@ -171,7 +202,10 @@ def _keep_zigzaggers_near(units, near_zigzaggers, count, near_range, ego, view_x
                                velocity=direction * speed, yaw=0.0 if direction > 0 else np.pi)
                 vehicles.append(vehicle)
                 unit = Unit(vehicle, None, direction, int(lane), 0.0, lane_ys)
-                unit.s, unit.v, unit.desired_speed = front, speed, speed
+                unit.s, unit.v, unit.desired_speed = front, speed, lane_speed
+                if camera_speed > 1.0:  # stay in front of a driving ego car
+                    unit.v = min(speed, camera_speed)
+                    unit.desired_speed = camera_speed * rng.uniform(0.97, 1.08)
                 unit.zigzag, unit.next_change_time = True, t + rng.uniform(0.0, 0.5)
                 group.append(unit)
                 near_zigzaggers.add(unit)
@@ -254,7 +288,7 @@ def simulate(vehicles, lane_centers, num_frames, warmup_frames, rng, zigzag_rati
             index = LaneIndex(group)
             # 1. lane change decisions
             for unit in group:
-                if unit.is_ego or unit.change is not None:
+                if unit.is_ego or unit.change is not None or unit.v < 1.0:
                     continue
                 targets = _allowed_lanes(unit, num_lanes[direction], zigzag_lanes if unit.zigzag else 1)
                 if not targets:
@@ -283,6 +317,7 @@ def simulate(vehicles, lane_centers, num_frames, warmup_frames, rng, zigzag_rati
                         else:
                             duration, pause = rng.uniform(3.0, 5.0), 5.0
                         unit.change = (unit.lane, target, t, duration)
+                        unit.change_progress = 0.0
                         unit.last_direction = step_side
                         for lane in path:
                             index.add(unit, lane)
@@ -318,7 +353,13 @@ def simulate(vehicles, lane_centers, num_frames, warmup_frames, rng, zigzag_rati
                 previous_y = unit.y
                 if unit.change is not None:
                     source, target, start, duration = unit.change
-                    u = min(1.0, (t - start) / duration)
+                    # progress needs forward motion: the peak heading of the (1 - cos) lateral profile is kept
+                    # under MAX_LANE_CHANGE_HEADING, so slow vehicles change lanes slowly and never slide sideways
+                    lateral = abs(unit.lane_ys[target] - unit.lane_ys[source])
+                    peak_rate = np.pi / 2 * lateral / duration  # lateral speed at full rate
+                    rate = min(1.0, np.tan(MAX_LANE_CHANGE_HEADING) * unit.v / peak_rate)
+                    unit.change_progress = min(1.0, unit.change_progress + rate * DT / duration)
+                    u = unit.change_progress
                     blend = (1 - np.cos(np.pi * u)) / 2
                     unit.y = unit.lane_ys[source] + (unit.lane_ys[target] - unit.lane_ys[source]) * blend + unit.offset
                     if u >= 1.0:
