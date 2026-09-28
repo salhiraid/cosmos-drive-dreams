@@ -219,6 +219,15 @@ python render_from_rds_hq.py -i highway_long -o highway_long_render -d highway_f
     --skip lidar --skip world_scenario --chunk_frames 0
 ```
 
+**Zigzag batches at 15 fps.** `--zigzag_lanes 2` lets a zigzagging car cross up to two lanes in one move (every crossed lane must have a safe gap). `generate_random_highway_scenes.py --zigzag_focus` makes every clip a zigzag clip: 3-5 cars weave within 25-45 m in front of the camera every 0.6-1.0 s, some with two-lane jumps. For 121-frame videos at 15 fps (8 s), simulate 241 frames at 30 fps and render with the 15 fps camera config, which keeps every second frame:
+```bash
+python generate_random_highway_scenes.py -o zigzag_batch -n 100 --prefix zigzag --zigzag_focus --num_frames 241 \
+    --camera ego --min_lanes 3 --max_lanes 4 --traffic free_flow,moderate,dense
+python render_from_rds_hq.py -i zigzag_batch -o zigzag_batch_render -d highway_fixed_15fps -c ftheta \
+    -cj zigzag_batch/clip_ids.json --skip lidar --skip world_scenario
+```
+Video frame `i` then matches label frame `2 * i` in `all_object_info`. Generate with `--fps 15` so the videos play in real time.
+
 **Keeping the camera static.** Cosmos-Transfer1-7B-Sample-AV was trained on driving footage, so with a fixed camera it may move the camera instead of the vehicles. The scene scripts therefore add static roadside landmarks (light poles every `--pole_spacing` m and road signs every `--sign_spacing` m) and captions that say the camera is static. Pass `--static_camera` to `scripts/generate_video_single_view.py` to put camera motion in the negative prompt, and check the results with `scripts/check_static_camera.py`, which measures how far the background drifts and can move failing videos aside:
 ```bash
 python scripts/check_static_camera.py -i outputs/parked_videos --threshold 8 --move_to outputs/parked_videos_moving

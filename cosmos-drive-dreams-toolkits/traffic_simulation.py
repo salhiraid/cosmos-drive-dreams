@@ -53,7 +53,11 @@ class Unit:
         return self.s - self.length
 
     def occupied_lanes(self):
-        return {self.change[0], self.change[1]} if self.change else {self.lane}
+        """The current lane, or every lane between source and target while changing lanes."""
+        if self.change is None:
+            return {self.lane}
+        low, high = sorted(self.change[:2])
+        return set(range(low, high + 1))
 
 
 def _idm_accel(unit, gap, leader_speed):
@@ -108,8 +112,8 @@ def _lane_is_safe(unit, target, index):
     return True
 
 
-def _allowed_lanes(unit, num_lanes):
-    lanes = [unit.lane - 1, unit.lane + 1]
+def _allowed_lanes(unit, num_lanes, max_jump=1):
+    lanes = [unit.lane + side * k for k in range(1, max_jump + 1) for side in (-1, 1)]
     lanes = [l for l in lanes if 0 <= l < num_lanes]
     if unit.heavy and num_lanes >= 3:
         lanes = [l for l in lanes if l != 0]   # heavy vehicles stay out of the fast lane
@@ -179,7 +183,8 @@ def _keep_zigzaggers_near(units, near_zigzaggers, count, near_range, ego, view_x
 
 def simulate(vehicles, lane_centers, num_frames, warmup_frames, rng, zigzag_ratio=0.0, lane_change_rate=0.0,
              ego_lane=None, ego_x=0.0, ego_speed=0.0, zigzag_period=1.5, zigzag_near=0, view_x=0.0, view_dir=1.0,
-             zigzag_near_range=(3.0, 60.0), view_y=0.0, zigzag_types=("car",), new_zigzag_vehicle=None):
+             zigzag_near_range=(3.0, 60.0), view_y=0.0, zigzag_types=("car",), new_zigzag_vehicle=None,
+             zigzag_lanes=1):
     """
     zigzag_near: during the recording, keep at least N zigzagging light vehicles within zigzag_near_range meters in
     front of the camera (along view_dir from view_x, or from the ego car's front), on the camera's side of the
@@ -188,6 +193,7 @@ def simulate(vehicles, lane_centers, num_frames, warmup_frames, rng, zigzag_rati
     new_zigzag_vehicle: optional callable returning a vehicle dict (type, subtype, lwh); when there are not enough
     zigzag_types vehicles in range at the first recorded frame, new ones are added in free gaps (appended to
     `vehicles`).
+    zigzag_lanes: most lanes a zigzagging vehicle crosses in one move (2 = can jump two lanes at once).
     zigzag_types: vehicle subtypes that may zigzag (e.g. ("car", "pickup")); heavy vehicles never do.
     zigzag_period: seconds per lane change of a zigzagging vehicle, pause included (1.0 = three lane changes in
     three seconds when the gaps allow it). Zigzaggers alternate left / right when they can.
@@ -250,7 +256,7 @@ def simulate(vehicles, lane_centers, num_frames, warmup_frames, rng, zigzag_rati
             for unit in group:
                 if unit.is_ego or unit.change is not None:
                     continue
-                targets = _allowed_lanes(unit, num_lanes[direction])
+                targets = _allowed_lanes(unit, num_lanes[direction], zigzag_lanes if unit.zigzag else 1)
                 if not targets:
                     continue
                 want = False
@@ -265,17 +271,21 @@ def simulate(vehicles, lane_centers, num_frames, warmup_frames, rng, zigzag_rati
                     continue
                 rng.shuffle(targets)
                 if unit.zigzag:  # zig then zag: prefer going back the way the last change came from
-                    targets.sort(key=lambda lane: (lane - unit.lane) == unit.last_direction)
+                    targets.sort(key=lambda lane: np.sign(lane - unit.lane) == unit.last_direction)
                 for target in targets:
-                    if _lane_is_safe(unit, target, index):
+                    step_side = 1 if target > unit.lane else -1
+                    path = list(range(unit.lane + step_side, target + step_side, step_side))  # every lane crossed
+                    if all(_lane_is_safe(unit, lane, index) for lane in path):
                         if unit.zigzag:
-                            duration = rng.uniform(0.85, 1.0) * zigzag_period
+                            # a multi-lane jump takes only a little longer than a single lane change
+                            duration = rng.uniform(0.85, 1.0) * zigzag_period * (1 + 0.15 * (len(path) - 1))
                             pause = rng.uniform(0.0, 0.15) * zigzag_period
                         else:
                             duration, pause = rng.uniform(3.0, 5.0), 5.0
                         unit.change = (unit.lane, target, t, duration)
-                        unit.last_direction = target - unit.lane
-                        index.add(unit, target)
+                        unit.last_direction = step_side
+                        for lane in path:
+                            index.add(unit, lane)
                         unit.next_change_time = t + duration + pause
                         break
                 else:
